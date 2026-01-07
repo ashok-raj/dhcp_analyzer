@@ -70,6 +70,21 @@ Type 'exit' or 'quit' to exit.
     def parse_dhcp_packet(self, pkt, idx):
         """Parse DHCP packet and extract relevant information"""
         try:
+            # Extract UDP checksum info if available
+            udp_chksum = None
+            udp_chksum_valid = None
+            if UDP in pkt:
+                udp_chksum = pkt[UDP].chksum
+                # Check if checksum is valid (scapy marks it)
+                udp_chksum_valid = pkt[UDP].chksum == 0 or hasattr(pkt[UDP], 'chksum')
+
+            # Extract IP flags and ID
+            ip_flags = None
+            ip_id = None
+            if IP in pkt:
+                ip_flags = pkt[IP].flags
+                ip_id = pkt[IP].id
+
             dhcp_info = {
                 'index': idx,
                 'packet': pkt,
@@ -84,7 +99,11 @@ Type 'exit' or 'quit' to exit.
                 'your_ip': pkt[BOOTP].yiaddr if BOOTP in pkt else None,
                 'server_ip': pkt[BOOTP].siaddr if BOOTP in pkt else None,
                 'message_type': None,
-                'message_type_name': 'UNKNOWN'
+                'message_type_name': 'UNKNOWN',
+                'udp_chksum': udp_chksum,
+                'udp_chksum_valid': udp_chksum_valid,
+                'ip_flags': ip_flags,
+                'ip_id': ip_id
             }
 
             # Extract DHCP message type
@@ -117,53 +136,295 @@ Type 'exit' or 'quit' to exit.
             print(f"    Server IP: {pkt_info['server_ip']:15s} | XID: 0x{pkt_info['transaction_id']:08x}")
 
     def do_summary(self, arg):
-        """Show summary of all DHCP packets"""
+        """Show comprehensive summary with analysis and recommendations"""
         print("\n" + "="*80)
-        print("DHCP PACKET SUMMARY")
+        print("DHCP PACKET ANALYSIS SUMMARY")
         print("="*80)
 
-        # Overall stats
-        print(f"\nTotal DHCP packets: {len(self.dhcp_packets)}")
-
-        # Message type counts
-        print("\nMessage type breakdown:")
-        msg_counts = Counter([p['message_type_name'] for p in self.dhcp_packets])
-        for msg_type, count in sorted(msg_counts.items()):
-            print(f"  {msg_type:10s}: {count:4d}")
-
-        # Unique MACs
-        unique_macs = set([p['client_mac'] for p in self.dhcp_packets if p['client_mac']])
-        print(f"\nUnique client MACs: {len(unique_macs)}")
-
-        # MACs with most activity
-        mac_counts = Counter([p['client_mac'] for p in self.dhcp_packets if p['client_mac']])
-        print("\nTop 5 most active MACs:")
-        for mac, count in mac_counts.most_common(5):
-            # Find last successful ACK for this MAC
-            last_ip = None
-            last_ack_time = None
-            for pkt in sorted([p for p in self.dhcp_packets if p['client_mac'] == mac],
-                            key=lambda x: x['timestamp'], reverse=True):
-                if pkt['message_type'] == 5:  # ACK
-                    last_ip = pkt['your_ip']
-                    last_ack_time = pkt['timestamp']
-                    break
-
-            if last_ip and last_ip != '0.0.0.0':
-                time_str = self.format_timestamp(last_ack_time)
-                print(f"  {mac}: {count} packets | Last IP: {last_ip} ({time_str})")
-            else:
-                print(f"  {mac}: {count} packets | No successful lease")
-
-        # Time range
+        # Capture file overview
         if self.dhcp_packets:
             start_time = min(p['timestamp'] for p in self.dhcp_packets)
             end_time = max(p['timestamp'] for p in self.dhcp_packets)
             duration = end_time - start_time
-            print(f"\nCapture time range:")
-            print(f"  Start: {self.format_timestamp(start_time)}")
-            print(f"  End:   {self.format_timestamp(end_time)}")
+
+            print(f"\n📊 CAPTURE FILE OVERVIEW")
             print(f"  Duration: {duration:.1f} seconds ({duration/60:.1f} minutes)")
+            print(f"  Total DHCP packets: {len(self.dhcp_packets)}")
+            print(f"  Capture period: {self.format_timestamp(start_time)} to {self.format_timestamp(end_time)}")
+            if duration > 0:
+                packet_rate = len(self.dhcp_packets) / duration
+                print(f"  Average rate: {packet_rate:.1f} packets/second")
+
+        # Message type counts
+        print(f"\n📨 MESSAGE TYPE BREAKDOWN")
+        msg_counts = Counter([p['message_type_name'] for p in self.dhcp_packets])
+        discovers = msg_counts.get('DISCOVER', 0)
+        offers = msg_counts.get('OFFER', 0)
+        requests = msg_counts.get('REQUEST', 0)
+        acks = msg_counts.get('ACK', 0)
+        naks = msg_counts.get('NAK', 0)
+
+        for msg_type, count in sorted(msg_counts.items()):
+            print(f"  {msg_type:10s}: {count:4d}")
+
+        # CRITICAL FINDINGS - Ratio Analysis
+        print(f"\n🔍 CRITICAL FINDINGS")
+
+        # Check for duplicate responses
+        total_requests = discovers + requests
+        if total_requests > 0:
+            ack_ratio = acks / total_requests
+            if ack_ratio > 1.1:
+                duplicates_estimated = acks - total_requests
+                print(f"  ⚠️  DUPLICATE DHCP ACK RESPONSES DETECTED!")
+                print(f"      Requests: {total_requests}")
+                print(f"      ACKs: {acks}")
+                print(f"      Ratio: {ack_ratio:.2f}:1 (expected: 1:1)")
+                print(f"      Estimated duplicate ACKs: ~{duplicates_estimated}")
+                print(f"      This indicates a DHCP server bug or misconfiguration")
+            else:
+                print(f"  ✓ ACK/REQUEST ratio: {ack_ratio:.2f}:1 (normal)")
+
+        if discovers > 0:
+            offer_ratio = offers / discovers
+            if offer_ratio > 1.1:
+                print(f"  ⚠️  Multiple OFFERs per DISCOVER: {offer_ratio:.2f}:1")
+                print(f"      May indicate multiple DHCP servers or duplicate responses")
+
+        # DHCP Server Information
+        print(f"\n🖥️  DHCP SERVER(S)")
+        server_ips = set()
+        server_stats = {}
+        lease_times = {}
+
+        for pkt in self.dhcp_packets:
+            if pkt['message_type'] in [2, 5]:  # OFFER or ACK
+                if pkt['src_ip'] and pkt['src_ip'] != '0.0.0.0':
+                    server_ips.add(pkt['src_ip'])
+                    if pkt['src_ip'] not in server_stats:
+                        server_stats[pkt['src_ip']] = {'offers': 0, 'acks': 0, 'naks': 0}
+
+                    if pkt['message_type'] == 2:
+                        server_stats[pkt['src_ip']]['offers'] += 1
+                    elif pkt['message_type'] == 5:
+                        server_stats[pkt['src_ip']]['acks'] += 1
+
+                        # Extract lease time
+                        dhcp_pkt = pkt['packet']
+                        if DHCP in dhcp_pkt:
+                            for opt in dhcp_pkt[DHCP].options:
+                                if isinstance(opt, tuple) and opt[0] == 'lease_time':
+                                    lease_times[pkt['src_ip']] = opt[1]
+                                    break
+
+            if pkt['message_type'] == 6 and pkt['src_ip']:  # NAK
+                if pkt['src_ip'] not in server_stats:
+                    server_stats[pkt['src_ip']] = {'offers': 0, 'acks': 0, 'naks': 0}
+                server_stats[pkt['src_ip']]['naks'] += 1
+
+        if server_ips:
+            for server in sorted(server_ips):
+                stats = server_stats[server]
+                lease_time = lease_times.get(server, 0)
+                print(f"  {server}:")
+                print(f"    OFFERs: {stats['offers']}, ACKs: {stats['acks']}, NAKs: {stats['naks']}")
+                if lease_time:
+                    print(f"    Lease time: {lease_time}s ({lease_time/3600:.1f} hours)")
+        else:
+            print("  No server responses detected")
+
+        # Network configuration
+        if server_ips:
+            print(f"\n🌐 NETWORK CONFIGURATION")
+            # Determine network from assigned IPs
+            assigned_ips = set()
+            for pkt in self.dhcp_packets:
+                if pkt['message_type'] in [2, 5] and pkt['your_ip'] and pkt['your_ip'] != '0.0.0.0':
+                    assigned_ips.add(pkt['your_ip'])
+
+            if assigned_ips:
+                sorted_ips = sorted(assigned_ips, key=lambda ip: tuple(map(int, ip.split('.'))))
+                first_octets = '.'.join(sorted_ips[0].split('.')[:3])
+                print(f"  Network: {first_octets}.0/24 (inferred)")
+                print(f"  DHCP Server: {', '.join(sorted(server_ips))}")
+                print(f"  Unique IPs assigned: {len(assigned_ips)}")
+                if len(assigned_ips) <= 10:
+                    print(f"  IPs: {', '.join(sorted_ips)}")
+                else:
+                    print(f"  Range: {sorted_ips[0]} - {sorted_ips[-1]}")
+
+        # Client analysis
+        print(f"\n👥 TOP DHCP ACTIVE CLIENTS")
+        mac_counts = Counter([p['client_mac'] for p in self.dhcp_packets if p['client_mac']])
+
+        # Collect vendor info
+        mac_vendor_info = {}
+        for pkt in self.dhcp_packets:
+            mac = pkt['client_mac']
+            if mac and mac not in mac_vendor_info:
+                dhcp_pkt = pkt['packet']
+                if DHCP in dhcp_pkt:
+                    for opt in dhcp_pkt[DHCP].options:
+                        if isinstance(opt, tuple):
+                            if opt[0] == 'vendor_class_id':
+                                vendor = opt[1].decode('utf-8', errors='ignore') if isinstance(opt[1], bytes) else str(opt[1])
+                                mac_vendor_info[mac] = vendor
+                                break
+                            elif opt[0] == 'hostname':
+                                hostname = opt[1].decode('utf-8', errors='ignore') if isinstance(opt[1], bytes) else str(opt[1])
+                                if mac not in mac_vendor_info:
+                                    mac_vendor_info[mac] = f"Hostname: {hostname}"
+
+        for mac, count in mac_counts.most_common(5):
+            # Find last successful ACK for this MAC
+            last_ip = None
+            for pkt in sorted([p for p in self.dhcp_packets if p['client_mac'] == mac],
+                            key=lambda x: x['timestamp'], reverse=True):
+                if pkt['message_type'] == 5:  # ACK
+                    last_ip = pkt['your_ip']
+                    break
+
+            vendor_info = mac_vendor_info.get(mac, '')
+            if vendor_info:
+                print(f"  {mac}: {count} packets")
+                print(f"    {vendor_info}")
+                if last_ip and last_ip != '0.0.0.0':
+                    print(f"    Last IP: {last_ip}")
+            else:
+                if last_ip and last_ip != '0.0.0.0':
+                    print(f"  {mac}: {count} packets | Last IP: {last_ip}")
+                else:
+                    print(f"  {mac}: {count} packets | No successful lease")
+
+        # Success/Failure Analysis
+        print(f"\n✅ DORA SEQUENCE ANALYSIS")
+        sequences = defaultdict(lambda: defaultdict(list))
+        for pkt in self.dhcp_packets:
+            mac = pkt['client_mac']
+            xid = pkt['transaction_id']
+            sequences[mac][xid].append(pkt)
+
+        total_sequences = 0
+        successful_sequences = 0
+        failed_sequences = 0
+        nak_sequences = 0
+
+        for mac, xid_groups in sequences.items():
+            for xid, pkts in xid_groups.items():
+                msg_types = [p['message_type'] for p in pkts]
+                has_discover = 1 in msg_types
+                has_request = 3 in msg_types
+
+                if has_discover or has_request:
+                    total_sequences += 1
+                    has_ack = 5 in msg_types
+                    has_nak = 6 in msg_types
+
+                    if has_ack:
+                        successful_sequences += 1
+                    elif has_nak:
+                        nak_sequences += 1
+                        failed_sequences += 1
+                    else:
+                        failed_sequences += 1
+
+        if total_sequences > 0:
+            success_rate = (successful_sequences / total_sequences) * 100
+            print(f"  Total sequences: {total_sequences}")
+            print(f"  Successful: {successful_sequences} ({success_rate:.1f}%)")
+            print(f"  Failed: {failed_sequences} ({100-success_rate:.1f}%)")
+            if nak_sequences > 0:
+                print(f"  NAKs: {nak_sequences}")
+
+            if success_rate < 80:
+                print(f"  ⚠️  Low success rate indicates DHCP issues!")
+
+        # KEY OBSERVATIONS
+        print(f"\n🔎 KEY OBSERVATIONS")
+
+        # Check for aggressive renewal behavior
+        renewals = requests - discovers if requests > discovers else 0
+        if renewals > discovers * 2 and lease_times:
+            print(f"  ⚠️  High renewal activity detected:")
+            print(f"      REQUESTs without DISCOVER: {renewals}")
+            print(f"      This may indicate clients renewing too frequently")
+
+            # Calculate average renewal interval for top client
+            if mac_counts:
+                top_mac = mac_counts.most_common(1)[0][0]
+                mac_requests = [p['timestamp'] for p in self.dhcp_packets
+                               if p['client_mac'] == top_mac and p['message_type'] == 3]
+                if len(mac_requests) > 1:
+                    mac_requests.sort()
+                    intervals = [mac_requests[i+1] - mac_requests[i]
+                                for i in range(len(mac_requests)-1)]
+                    if intervals:
+                        avg_interval = sum(intervals) / len(intervals)
+                        lease_time = list(lease_times.values())[0] if lease_times else 0
+                        if lease_time and avg_interval < lease_time * 0.01:
+                            print(f"      Average renewal interval: ~{avg_interval:.1f}s")
+                            print(f"      Expected (T1 at 50% of lease): {lease_time * 0.5:.0f}s")
+                            print(f"      ⚠️  Renewing {(lease_time * 0.5 / avg_interval):.0f}x more frequently than expected!")
+
+        # Vendor-specific observations
+        tplink_clients = [mac for mac, vendor in mac_vendor_info.items() if 'TP-Link' in vendor]
+        if tplink_clients:
+            print(f"  • TP-Link devices detected: {len(tplink_clients)}")
+            print(f"      Using vendor class: TP-Link,dslforum.org")
+            print(f"      May exhibit vendor-specific DHCP behavior")
+
+        # Duplicate detection hint
+        if acks > total_requests * 1.5:
+            print(f"  • Multiple server responses per request detected")
+            print(f"      Run 'duplicates' command for detailed analysis")
+
+        # RECOMMENDATIONS
+        print(f"\n💡 RECOMMENDATIONS")
+
+        issues_found = []
+
+        if total_requests > 0 and acks / total_requests > 1.1:
+            issues_found.append("duplicate_acks")
+            print(f"  1. Investigate DHCP server for duplicate ACK bug")
+            print(f"     • Check router firmware version")
+            print(f"     • Look for known issues with duplicate responses")
+            print(f"     • Run 'checksums' to check for UDP checksum corruption")
+            print(f"     • Run 'duplicates' for detailed duplicate analysis")
+
+        if renewals > discovers * 2:
+            issues_found.append("aggressive_renewals")
+            print(f"  2. Review client DHCP renewal behavior")
+            print(f"     • Clients renewing too frequently")
+            print(f"     • Run 'renewals' for detailed renewal analysis")
+            print(f"     • Check client firmware for bugs")
+
+        if tplink_clients:
+            issues_found.append("tplink_devices")
+            print(f"  3. TP-Link device-specific recommendations")
+            print(f"     • Update TP-Link firmware to latest version")
+            print(f"     • Run 'vendor' to analyze vendor-specific options")
+            print(f"     • Monitor for 10-second renewal intervals")
+
+        if success_rate < 80 and total_sequences > 0:
+            issues_found.append("low_success")
+            print(f"  4. Address low DHCP success rate ({success_rate:.1f}%)")
+            print(f"     • Run 'failed_dora' to identify problematic clients")
+            print(f"     • Check for IP pool exhaustion")
+            print(f"     • Review NAK messages with 'naks' command")
+
+        if not issues_found:
+            print(f"  ✓ No critical issues detected")
+            print(f"  • DHCP server appears to be functioning normally")
+            print(f"  • Success rate: {success_rate:.1f}%")
+
+        # Next steps
+        print(f"\n📋 SUGGESTED NEXT STEPS")
+        print(f"  • Run 'ratios' for quick ratio analysis")
+        print(f"  • Run 'duplicates' to detect duplicate responses")
+        print(f"  • Run 'renewals' to analyze renewal patterns")
+        print(f"  • Run 'vendor' to check vendor-specific options")
+        print(f"  • Run 'list_mac <mac>' to see detailed sequences for specific client")
+        print(f"  • Run 'help' to see all available commands")
 
         print("="*80 + "\n")
 
@@ -644,6 +905,940 @@ Type 'exit' or 'quit' to exit.
 
         print("="*80 + "\n")
 
+    def do_timings(self, arg):
+        """Analyze timing between DHCP messages
+        Usage: timings [mac_address]
+        """
+        print("\n" + "="*80)
+        print("DHCP MESSAGE TIMING ANALYSIS")
+        print("="*80)
+
+        # Filter by MAC if provided
+        mac_filter = None
+        if arg.strip():
+            mac_filter = arg.strip().lower()
+            print(f"\nFiltered by MAC: {mac_filter}")
+
+        # Group packets by MAC and transaction ID
+        sequences = defaultdict(lambda: defaultdict(list))
+        for pkt in self.dhcp_packets:
+            mac = pkt['client_mac']
+            if mac_filter and mac_filter not in (mac or '').lower():
+                continue
+            xid = pkt['transaction_id']
+            sequences[mac][xid].append(pkt)
+
+        # Collect timing statistics
+        discover_to_offer = []
+        offer_to_request = []
+        request_to_ack = []
+        request_to_nak = []
+        full_dora = []
+
+        for mac, xid_groups in sequences.items():
+            for xid, pkts in xid_groups.items():
+                pkts_sorted = sorted(pkts, key=lambda x: x['timestamp'])
+
+                discover_pkt = next((p for p in pkts_sorted if p['message_type'] == 1), None)
+                offer_pkt = next((p for p in pkts_sorted if p['message_type'] == 2), None)
+                request_pkt = next((p for p in pkts_sorted if p['message_type'] == 3), None)
+                ack_pkt = next((p for p in pkts_sorted if p['message_type'] == 5), None)
+                nak_pkt = next((p for p in pkts_sorted if p['message_type'] == 6), None)
+
+                if discover_pkt and offer_pkt:
+                    discover_to_offer.append(offer_pkt['timestamp'] - discover_pkt['timestamp'])
+
+                if offer_pkt and request_pkt:
+                    offer_to_request.append(request_pkt['timestamp'] - offer_pkt['timestamp'])
+
+                if request_pkt and ack_pkt:
+                    request_to_ack.append(ack_pkt['timestamp'] - request_pkt['timestamp'])
+
+                if request_pkt and nak_pkt:
+                    request_to_nak.append(nak_pkt['timestamp'] - request_pkt['timestamp'])
+
+                if discover_pkt and ack_pkt:
+                    full_dora.append(ack_pkt['timestamp'] - discover_pkt['timestamp'])
+
+        # Display results
+        def print_timing_stats(name, timings):
+            if timings:
+                avg = sum(timings) / len(timings)
+                min_t = min(timings)
+                max_t = max(timings)
+                print(f"\n{name}:")
+                print(f"  Count: {len(timings)}")
+                print(f"  Average: {avg*1000:.1f}ms")
+                print(f"  Min: {min_t*1000:.1f}ms")
+                print(f"  Max: {max_t*1000:.1f}ms")
+            else:
+                print(f"\n{name}:")
+                print(f"  No data available")
+
+        print_timing_stats("DISCOVER → OFFER (Server Response Time)", discover_to_offer)
+        print_timing_stats("OFFER → REQUEST (Client Decision Time)", offer_to_request)
+        print_timing_stats("REQUEST → ACK (Server Processing Time)", request_to_ack)
+        print_timing_stats("REQUEST → NAK (Server Rejection Time)", request_to_nak)
+        print_timing_stats("Full DORA (DISCOVER → ACK)", full_dora)
+
+        print("\n" + "="*80 + "\n")
+
+    def do_servers(self, arg):
+        """List all DHCP servers and their statistics
+        Usage: servers
+        """
+        print("\n" + "="*80)
+        print("DHCP SERVER ANALYSIS")
+        print("="*80)
+
+        # Collect server statistics
+        server_stats = defaultdict(lambda: {
+            'offers': 0,
+            'acks': 0,
+            'naks': 0,
+            'discovers_seen': 0,
+            'requests_seen': 0
+        })
+
+        # Count messages
+        for pkt in self.dhcp_packets:
+            if pkt['message_type'] == 1:  # DISCOVER
+                # Count discovers to calculate response rate
+                pass
+            elif pkt['message_type'] == 2:  # OFFER
+                server = pkt['src_ip']
+                if server and server != '0.0.0.0':
+                    server_stats[server]['offers'] += 1
+            elif pkt['message_type'] == 5:  # ACK
+                server = pkt['src_ip']
+                if server and server != '0.0.0.0':
+                    server_stats[server]['acks'] += 1
+            elif pkt['message_type'] == 6:  # NAK
+                server = pkt['src_ip']
+                if server and server != '0.0.0.0':
+                    server_stats[server]['naks'] += 1
+
+        if not server_stats:
+            print("\nNo DHCP servers detected")
+            print("="*80 + "\n")
+            return
+
+        print(f"\nFound {len(server_stats)} DHCP server(s)\n")
+
+        # Display server statistics
+        for server in sorted(server_stats.keys()):
+            stats = server_stats[server]
+            total_responses = stats['offers'] + stats['acks'] + stats['naks']
+
+            print(f"Server: {server}")
+            print(f"  OFFERs: {stats['offers']}")
+            print(f"  ACKs: {stats['acks']}")
+            print(f"  NAKs: {stats['naks']}")
+            print(f"  Total responses: {total_responses}")
+
+            if stats['acks'] + stats['naks'] > 0:
+                success_rate = (stats['acks'] / (stats['acks'] + stats['naks'])) * 100
+                print(f"  Success rate (ACK vs NAK): {success_rate:.1f}%")
+
+            print()
+
+        print("="*80 + "\n")
+
+    def do_ips(self, arg):
+        """Show IP address assignments and usage
+        Usage: ips [mac_address]
+        """
+        print("\n" + "="*80)
+        print("IP ADDRESS ASSIGNMENTS")
+        print("="*80)
+
+        # Filter by MAC if provided
+        mac_filter = None
+        if arg.strip():
+            mac_filter = arg.strip().lower()
+            print(f"\nFiltered by MAC: {mac_filter}")
+
+        # Collect IP assignments
+        ip_assignments = defaultdict(list)  # ip -> [(mac, timestamp, msg_type)]
+
+        for pkt in self.dhcp_packets:
+            if pkt['message_type'] in [2, 5]:  # OFFER or ACK
+                mac = pkt['client_mac']
+                if mac_filter and mac_filter not in (mac or '').lower():
+                    continue
+
+                ip = pkt['your_ip']
+                if ip and ip != '0.0.0.0':
+                    msg_type = 'OFFER' if pkt['message_type'] == 2 else 'ACK'
+                    ip_assignments[ip].append((mac, pkt['timestamp'], msg_type))
+
+        if not ip_assignments:
+            print("\nNo IP assignments found")
+            print("="*80 + "\n")
+            return
+
+        print(f"\nTotal unique IPs: {len(ip_assignments)}\n")
+
+        # Sort IPs
+        sorted_ips = sorted(ip_assignments.keys(), key=lambda ip: tuple(map(int, ip.split('.'))))
+
+        for ip in sorted_ips:
+            assignments = ip_assignments[ip]
+            unique_macs = set([a[0] for a in assignments])
+
+            print(f"IP: {ip}")
+            print(f"  Assigned to {len(unique_macs)} MAC(s): {', '.join(unique_macs)}")
+            print(f"  Total assignments: {len(assignments)} (OFFERs + ACKs)")
+
+            if len(unique_macs) > 1:
+                print(f"  ⚠️  WARNING: Multiple MACs assigned same IP (potential conflict)")
+
+            # Show recent assignments
+            recent = sorted(assignments, key=lambda x: x[1], reverse=True)[:3]
+            print(f"  Recent assignments:")
+            for mac, ts, msg_type in recent:
+                time_str = self.format_timestamp(ts)
+                print(f"    [{time_str}] {msg_type} to {mac}")
+
+            print()
+
+        print("="*80 + "\n")
+
+    def do_retries(self, arg):
+        """Find retransmission patterns and duplicate messages
+        Usage: retries [mac_address]
+        """
+        print("\n" + "="*80)
+        print("DHCP RETRANSMISSION ANALYSIS")
+        print("="*80)
+
+        # Filter by MAC if provided
+        mac_filter = None
+        if arg.strip():
+            mac_filter = arg.strip().lower()
+            print(f"\nFiltered by MAC: {mac_filter}")
+
+        # Group by MAC and XID
+        sequences = defaultdict(lambda: defaultdict(list))
+        for pkt in self.dhcp_packets:
+            mac = pkt['client_mac']
+            if mac_filter and mac_filter not in (mac or '').lower():
+                continue
+            xid = pkt['transaction_id']
+            sequences[mac][xid].append(pkt)
+
+        retries_found = False
+
+        for mac in sorted(sequences.keys()):
+            xid_groups = sequences[mac]
+
+            mac_has_retries = False
+
+            for xid, pkts in sorted(xid_groups.items()):
+                pkts_sorted = sorted(pkts, key=lambda x: x['timestamp'])
+
+                # Count message types
+                msg_type_counts = Counter([p['message_type'] for p in pkts_sorted])
+
+                # Check for retries (multiple messages of same type with same XID)
+                discovers = [p for p in pkts_sorted if p['message_type'] == 1]
+                requests = [p for p in pkts_sorted if p['message_type'] == 3]
+
+                if len(discovers) > 1 or len(requests) > 1:
+                    if not mac_has_retries:
+                        print(f"\nMAC: {mac}")
+                        print("-" * 80)
+                        mac_has_retries = True
+                        retries_found = True
+
+                    print(f"\n  Transaction ID: 0x{xid:08x}")
+
+                    if len(discovers) > 1:
+                        print(f"  DISCOVER retries: {len(discovers)}")
+                        for i, pkt in enumerate(discovers):
+                            ts = self.format_timestamp(pkt['timestamp'])
+                            if i > 0:
+                                delta = pkt['timestamp'] - discovers[i-1]['timestamp']
+                                print(f"    #{i+1}: [{ts}] (retry after {delta:.3f}s)")
+                            else:
+                                print(f"    #{i+1}: [{ts}] (initial)")
+
+                    if len(requests) > 1:
+                        print(f"  REQUEST retries: {len(requests)}")
+                        for i, pkt in enumerate(requests):
+                            ts = self.format_timestamp(pkt['timestamp'])
+                            if i > 0:
+                                delta = pkt['timestamp'] - requests[i-1]['timestamp']
+                                print(f"    #{i+1}: [{ts}] (retry after {delta:.3f}s)")
+                            else:
+                                print(f"    #{i+1}: [{ts}] (initial)")
+
+        if not retries_found:
+            print("\nNo retransmissions detected")
+
+        print("\n" + "="*80 + "\n")
+
+    def do_options(self, arg):
+        """Parse and display DHCP options
+        Usage: options [mac_address]
+        """
+        print("\n" + "="*80)
+        print("DHCP OPTIONS ANALYSIS")
+        print("="*80)
+
+        # Filter by MAC if provided
+        mac_filter = None
+        if arg.strip():
+            mac_filter = arg.strip().lower()
+            print(f"\nFiltered by MAC: {mac_filter}")
+
+        packets_to_analyze = self.dhcp_packets
+        if mac_filter:
+            packets_to_analyze = [p for p in packets_to_analyze
+                                 if mac_filter in (p['client_mac'] or '').lower()]
+
+        if not packets_to_analyze:
+            print("\nNo packets found")
+            print("="*80 + "\n")
+            return
+
+        print(f"\nAnalyzing {len(packets_to_analyze)} packet(s)\n")
+
+        # Collect options from packets
+        options_by_type = defaultdict(lambda: defaultdict(set))
+
+        for pkt_info in packets_to_analyze:
+            pkt = pkt_info['packet']
+            msg_type_name = pkt_info['message_type_name']
+
+            if DHCP in pkt:
+                for opt in pkt[DHCP].options:
+                    if isinstance(opt, tuple):
+                        opt_name = opt[0]
+                        opt_value = opt[1]
+
+                        # Skip message-type as it's already displayed
+                        if opt_name == 'message-type':
+                            continue
+
+                        # Format value for display
+                        if isinstance(opt_value, bytes):
+                            opt_value = opt_value.hex(':')
+                        elif isinstance(opt_value, list):
+                            opt_value = ', '.join(str(v) for v in opt_value)
+
+                        options_by_type[msg_type_name][opt_name].add(str(opt_value))
+
+        # Display options grouped by message type
+        for msg_type in sorted(options_by_type.keys()):
+            options = options_by_type[msg_type]
+
+            print(f"\n{msg_type} Messages:")
+            print("-" * 80)
+
+            for opt_name in sorted(options.keys()):
+                values = options[opt_name]
+                if len(values) == 1:
+                    print(f"  {opt_name:30s}: {list(values)[0]}")
+                else:
+                    print(f"  {opt_name:30s}: (multiple values)")
+                    for val in sorted(values):
+                        print(f"    - {val}")
+
+        print("\n" + "="*80 + "\n")
+
+    def do_conflicts(self, arg):
+        """Detect IP address conflicts
+        Usage: conflicts
+        """
+        print("\n" + "="*80)
+        print("IP ADDRESS CONFLICT DETECTION")
+        print("="*80)
+
+        # Collect IP assignments with timestamps
+        ip_to_macs = defaultdict(list)  # ip -> [(mac, timestamp, msg_type)]
+
+        for pkt in self.dhcp_packets:
+            if pkt['message_type'] in [2, 5]:  # OFFER or ACK
+                ip = pkt['your_ip']
+                mac = pkt['client_mac']
+                if ip and ip != '0.0.0.0' and mac:
+                    msg_type = 'OFFER' if pkt['message_type'] == 2 else 'ACK'
+                    ip_to_macs[ip].append((mac, pkt['timestamp'], msg_type))
+
+        # Find DECLINE messages (indicate conflict detection by client)
+        declines = [p for p in self.dhcp_packets if p['message_type'] == 4]
+
+        # Check for conflicts
+        conflicts_found = False
+
+        # Check for same IP to multiple MACs
+        print("\nChecking for IPs assigned to multiple MACs...\n")
+        for ip in sorted(ip_to_macs.keys(), key=lambda x: tuple(map(int, x.split('.')))):
+            assignments = ip_to_macs[ip]
+            unique_macs = set([a[0] for a in assignments])
+
+            if len(unique_macs) > 1:
+                conflicts_found = True
+                print(f"⚠️  CONFLICT DETECTED: IP {ip}")
+                print(f"   Assigned to {len(unique_macs)} different MACs:")
+
+                for mac in sorted(unique_macs):
+                    mac_assignments = [a for a in assignments if a[0] == mac]
+                    latest = max(mac_assignments, key=lambda x: x[1])
+                    time_str = self.format_timestamp(latest[1])
+                    print(f"   - {mac}: {len(mac_assignments)} times (last: {latest[2]} at {time_str})")
+
+                print()
+
+        if not conflicts_found:
+            print("  No IP conflicts detected (no IP assigned to multiple MACs)")
+
+        # Check for DECLINE messages
+        if declines:
+            print(f"\nDECLINE messages detected ({len(declines)}):")
+            print("(Client detected IP conflict and declined the offer)\n")
+
+            for decline in declines:
+                ts = self.format_timestamp(decline['timestamp'])
+                mac = decline['client_mac']
+                ip = decline['client_ip'] or decline['your_ip'] or 'N/A'
+                print(f"  [{ts}] MAC: {mac} declined IP: {ip}")
+
+            conflicts_found = True
+        else:
+            print("\n  No DECLINE messages found")
+
+        if not conflicts_found:
+            print("\n✓ No conflicts detected")
+
+        print("\n" + "="*80 + "\n")
+
+    def do_duplicates(self, arg):
+        """Detect duplicate server responses (same XID, close timing)
+        Usage: duplicates [time_threshold_ms]
+        Default: 1000ms (1 second)
+        """
+        time_threshold = 1.0  # seconds
+
+        args = arg.strip().split()
+        if len(args) >= 1:
+            try:
+                time_threshold = float(args[0]) / 1000.0  # convert ms to seconds
+            except ValueError:
+                print("Invalid time threshold, using default (1000ms)")
+
+        print("\n" + "="*80)
+        print(f"DUPLICATE DHCP RESPONSE DETECTION (within {time_threshold*1000:.0f}ms)")
+        print("="*80)
+
+        # Group by transaction ID and message type
+        xid_groups = defaultdict(list)
+        for pkt in self.dhcp_packets:
+            if pkt['message_type'] in [2, 5, 6]:  # OFFER, ACK, NAK
+                key = (pkt['transaction_id'], pkt['message_type'])
+                xid_groups[key].append(pkt)
+
+        duplicates_found = False
+        total_duplicates = 0
+
+        for (xid, msg_type), pkts in sorted(xid_groups.items()):
+            if len(pkts) < 2:
+                continue
+
+            # Sort by timestamp
+            pkts_sorted = sorted(pkts, key=lambda x: x['timestamp'])
+
+            # Check for duplicates within time threshold
+            for i in range(len(pkts_sorted) - 1):
+                time_delta = pkts_sorted[i+1]['timestamp'] - pkts_sorted[i]['timestamp']
+
+                if time_delta <= time_threshold:
+                    if not duplicates_found:
+                        duplicates_found = True
+
+                    total_duplicates += 1
+                    msg_type_name = DHCP_MESSAGE_TYPES.get(msg_type, 'UNKNOWN')
+
+                    print(f"\n⚠️  DUPLICATE {msg_type_name} DETECTED")
+                    print(f"Transaction ID: 0x{xid:08x}")
+                    print(f"Time between duplicates: {time_delta*1000:.3f}ms")
+                    print(f"Client MAC: {pkts_sorted[i]['client_mac']}")
+                    print()
+
+                    # Show details of duplicate packets
+                    for idx, pkt in enumerate([pkts_sorted[i], pkts_sorted[i+1]], 1):
+                        ts = self.format_timestamp(pkt['timestamp'])
+                        ip_id = pkt.get('ip_id', 'N/A')
+                        ip_flags = pkt.get('ip_flags', 'N/A')
+                        chksum = pkt.get('udp_chksum', 'N/A')
+
+                        print(f"  Packet #{idx} (pkt index {pkt['index']}):")
+                        print(f"    Timestamp: {ts}")
+                        print(f"    Source: {pkt['src_ip']} -> Dest: {pkt['dst_ip']}")
+                        print(f"    IP ID: {ip_id}, IP Flags: {ip_flags}")
+                        print(f"    UDP Checksum: 0x{chksum:04x}" if isinstance(chksum, int) else f"    UDP Checksum: {chksum}")
+                        print(f"    Your IP: {pkt['your_ip']}")
+                    print()
+
+        if not duplicates_found:
+            print("\nNo duplicate responses detected")
+        else:
+            print(f"\nTotal duplicate response pairs found: {total_duplicates}")
+
+        print("="*80 + "\n")
+
+    def do_checksums(self, arg):
+        """Analyze UDP checksum issues
+        Usage: checksums
+        """
+        print("\n" + "="*80)
+        print("UDP CHECKSUM ANALYSIS")
+        print("="*80)
+
+        # Count packets by checksum status
+        total_packets = len(self.dhcp_packets)
+        checksum_issues = []
+        zero_checksums = 0
+
+        print("\nAnalyzing UDP checksums (this may take a moment)...\n")
+
+        for pkt_info in self.dhcp_packets:
+            pkt = pkt_info['packet']
+            if UDP in pkt:
+                try:
+                    # Store original checksum
+                    original_chksum = pkt[UDP].chksum
+
+                    # Skip packets with checksum 0 (checksum disabled)
+                    if original_chksum == 0:
+                        zero_checksums += 1
+                        continue
+
+                    # Create a copy to avoid modifying original
+                    from scapy.all import Raw
+                    pkt_copy = pkt.copy()
+
+                    # Delete checksum to force recalculation
+                    if UDP in pkt_copy:
+                        del pkt_copy[UDP].chksum
+                        if IP in pkt_copy:
+                            del pkt_copy[IP].chksum
+
+                        # Rebuild packet to recalculate checksum
+                        pkt_rebuilt = pkt_copy.__class__(bytes(pkt_copy))
+
+                        if UDP in pkt_rebuilt:
+                            calculated_chksum = pkt_rebuilt[UDP].chksum
+
+                            # Compare checksums
+                            if calculated_chksum and original_chksum != calculated_chksum:
+                                checksum_issues.append({
+                                    'pkt_info': pkt_info,
+                                    'original': original_chksum,
+                                    'calculated': calculated_chksum
+                                })
+                except Exception as e:
+                    # Skip packets that cause issues during recalculation
+                    pass
+
+        print(f"Total DHCP packets analyzed: {total_packets}")
+        print(f"Packets with checksum = 0 (disabled): {zero_checksums}")
+        print(f"Packets with checksum mismatches: {len(checksum_issues)}")
+
+        if checksum_issues:
+            print("\n⚠️  Packets with BAD checksums detected!\n")
+            print("These packets have UDP checksum corruption, likely due to:")
+            print("  • Hardware checksum offloading bugs")
+            print("  • Router firmware issues")
+            print("  • Network interface card problems\n")
+
+            # Limit output to first 20 to avoid overwhelming
+            display_count = min(len(checksum_issues), 20)
+
+            for issue in checksum_issues[:display_count]:
+                pkt_info = issue['pkt_info']
+                ts = self.format_timestamp(pkt_info['timestamp'])
+                msg_type = pkt_info['message_type_name']
+
+                print(f"  Packet #{pkt_info['index']} [{ts}] {msg_type}")
+                print(f"    {pkt_info['src_ip']} -> {pkt_info['dst_ip']}")
+                print(f"    Original checksum:   0x{issue['original']:04x}")
+                print(f"    Calculated checksum: 0x{issue['calculated']:04x}")
+                print(f"    Transaction ID: 0x{pkt_info['transaction_id']:08x}")
+                print()
+
+            if len(checksum_issues) > display_count:
+                print(f"  ... and {len(checksum_issues) - display_count} more packets with bad checksums\n")
+
+            # Analyze pattern
+            bad_msg_types = Counter([issue['pkt_info']['message_type_name'] for issue in checksum_issues])
+            print("Message types with bad checksums:")
+            for msg_type, count in bad_msg_types.most_common():
+                print(f"  {msg_type}: {count} packets")
+
+        else:
+            print("\n✓ All checksums are valid (or disabled)")
+
+        print("\n" + "="*80 + "\n")
+
+    def do_vendor(self, arg):
+        """Analyze vendor-specific DHCP options (60, 125)
+        Usage: vendor [mac_address]
+        """
+        print("\n" + "="*80)
+        print("VENDOR-SPECIFIC OPTIONS ANALYSIS")
+        print("="*80)
+
+        # Filter by MAC if provided
+        mac_filter = None
+        if arg.strip():
+            mac_filter = arg.strip().lower()
+            print(f"\nFiltered by MAC: {mac_filter}")
+
+        packets_to_analyze = self.dhcp_packets
+        if mac_filter:
+            packets_to_analyze = [p for p in packets_to_analyze
+                                 if mac_filter in (p['client_mac'] or '').lower()]
+
+        # Collect vendor information
+        vendor_class_ids = defaultdict(set)  # Option 60
+        vendor_specific = defaultdict(list)  # Option 125
+        hostnames = defaultdict(set)
+
+        for pkt_info in packets_to_analyze:
+            pkt = pkt_info['packet']
+            mac = pkt_info['client_mac']
+
+            if DHCP in pkt:
+                for opt in pkt[DHCP].options:
+                    if isinstance(opt, tuple):
+                        opt_name = opt[0]
+                        opt_value = opt[1]
+
+                        if opt_name == 'vendor_class_id':  # Option 60
+                            if isinstance(opt_value, bytes):
+                                vendor_class_ids[mac].add(opt_value.decode('utf-8', errors='ignore'))
+                            else:
+                                vendor_class_ids[mac].add(str(opt_value))
+
+                        elif opt_name == 'vendor_specific':  # Option 125
+                            if isinstance(opt_value, bytes):
+                                vendor_specific[mac].append({
+                                    'raw': opt_value.hex(':'),
+                                    'decoded': opt_value.decode('utf-8', errors='ignore'),
+                                    'timestamp': pkt_info['timestamp'],
+                                    'msg_type': pkt_info['message_type_name']
+                                })
+
+                        elif opt_name == 'hostname':  # Option 12
+                            if isinstance(opt_value, bytes):
+                                hostnames[mac].add(opt_value.decode('utf-8', errors='ignore'))
+                            else:
+                                hostnames[mac].add(str(opt_value))
+
+        # Display results
+        if not vendor_class_ids and not vendor_specific and not hostnames:
+            print("\nNo vendor-specific options found")
+            print("="*80 + "\n")
+            return
+
+        print(f"\nAnalyzing {len(packets_to_analyze)} packet(s)\n")
+
+        # Get all unique MACs
+        all_macs = set(vendor_class_ids.keys()) | set(vendor_specific.keys()) | set(hostnames.keys())
+
+        for mac in sorted(all_macs):
+            print(f"\nMAC: {mac}")
+            print("-" * 80)
+
+            if mac in hostnames:
+                print(f"  Hostname(s): {', '.join(sorted(hostnames[mac]))}")
+
+            if mac in vendor_class_ids:
+                print(f"  Vendor Class ID (Option 60):")
+                for vcid in sorted(vendor_class_ids[mac]):
+                    print(f"    - {vcid}")
+
+            if mac in vendor_specific:
+                print(f"  Vendor-Specific Info (Option 125):")
+                for vs in vendor_specific[mac][:5]:  # Show first 5
+                    print(f"    [{vs['msg_type']}] Decoded: {vs['decoded']}")
+                    print(f"    [{vs['msg_type']}] Raw Hex: {vs['raw']}")
+                if len(vendor_specific[mac]) > 5:
+                    print(f"    ... and {len(vendor_specific[mac]) - 5} more")
+
+            print()
+
+        print("="*80 + "\n")
+
+    def do_renewals(self, arg):
+        """Analyze DHCP renewal patterns vs lease times
+        Usage: renewals [mac_address]
+        """
+        print("\n" + "="*80)
+        print("DHCP RENEWAL PATTERN ANALYSIS")
+        print("="*80)
+
+        # Filter by MAC if provided
+        mac_filter = None
+        if arg.strip():
+            mac_filter = arg.strip().lower()
+            print(f"\nFiltered by MAC: {mac_filter}")
+
+        # Collect renewal information per MAC
+        mac_renewals = defaultdict(lambda: {'requests': [], 'lease_time': None})
+
+        for pkt_info in self.dhcp_packets:
+            mac = pkt_info['client_mac']
+            if mac_filter and mac_filter not in (mac or '').lower():
+                continue
+
+            # Track REQUEST messages (renewals)
+            if pkt_info['message_type'] == 3:  # REQUEST
+                mac_renewals[mac]['requests'].append(pkt_info['timestamp'])
+
+            # Extract lease time from ACK messages
+            if pkt_info['message_type'] == 5:  # ACK
+                pkt = pkt_info['packet']
+                if DHCP in pkt:
+                    for opt in pkt[DHCP].options:
+                        if isinstance(opt, tuple) and opt[0] == 'lease_time':
+                            mac_renewals[mac]['lease_time'] = opt[1]
+                            break
+
+        if not mac_renewals:
+            print("\nNo renewal data found")
+            print("="*80 + "\n")
+            return
+
+        print(f"\nAnalyzing renewal patterns for {len(mac_renewals)} MAC(s)\n")
+
+        for mac in sorted(mac_renewals.keys()):
+            data = mac_renewals[mac]
+            requests = sorted(data['requests'])
+            lease_time = data['lease_time']
+
+            if len(requests) < 2:
+                continue
+
+            print(f"\nMAC: {mac}")
+            print("-" * 80)
+
+            # Calculate intervals between requests
+            intervals = []
+            for i in range(1, len(requests)):
+                interval = requests[i] - requests[i-1]
+                intervals.append(interval)
+
+            if intervals:
+                avg_interval = sum(intervals) / len(intervals)
+                min_interval = min(intervals)
+                max_interval = max(intervals)
+
+                print(f"  Total renewal requests: {len(requests)}")
+                print(f"  Average renewal interval: {avg_interval:.1f}s ({avg_interval/60:.1f} minutes)")
+                print(f"  Min interval: {min_interval:.1f}s")
+                print(f"  Max interval: {max_interval:.1f}s")
+
+                if lease_time:
+                    print(f"  Lease time from server: {lease_time}s ({lease_time/3600:.1f} hours)")
+
+                    # Calculate expected renewal times (typically T1 = 50% of lease, T2 = 87.5%)
+                    expected_t1 = lease_time * 0.5
+                    expected_t2 = lease_time * 0.875
+
+                    print(f"  Expected T1 (50% of lease): {expected_t1:.1f}s ({expected_t1/3600:.1f} hours)")
+                    print(f"  Expected T2 (87.5% of lease): {expected_t2:.1f}s ({expected_t2/3600:.1f} hours)")
+
+                    # Check if renewal interval is suspicious
+                    if avg_interval < lease_time * 0.01:  # Less than 1% of lease time
+                        print(f"  ⚠️  WARNING: Renewal interval ({avg_interval:.1f}s) is abnormally short!")
+                        print(f"      Expected around {expected_t1:.1f}s, got {avg_interval:.1f}s")
+                        print(f"      This is {(expected_t1/avg_interval):.0f}x more frequent than expected!")
+                else:
+                    print(f"  Lease time: Not captured in this trace")
+
+                # Show some sample intervals
+                print(f"  Sample renewal intervals:")
+                for i, interval in enumerate(intervals[:5], 1):
+                    print(f"    Renewal #{i}: {interval:.1f}s after previous")
+                if len(intervals) > 5:
+                    print(f"    ... and {len(intervals) - 5} more renewals")
+
+        print("\n" + "="*80 + "\n")
+
+    def do_ratios(self, arg):
+        """Analyze request/reply ratios for anomaly detection
+        Usage: ratios
+        """
+        print("\n" + "="*80)
+        print("REQUEST/REPLY RATIO ANALYSIS")
+        print("="*80)
+
+        # Count message types
+        discovers = sum(1 for p in self.dhcp_packets if p['message_type'] == 1)
+        offers = sum(1 for p in self.dhcp_packets if p['message_type'] == 2)
+        requests = sum(1 for p in self.dhcp_packets if p['message_type'] == 3)
+        acks = sum(1 for p in self.dhcp_packets if p['message_type'] == 5)
+        naks = sum(1 for p in self.dhcp_packets if p['message_type'] == 6)
+
+        print(f"\nMessage Counts:")
+        print(f"  DISCOVERs:  {discovers:4d}")
+        print(f"  OFFERs:     {offers:4d}")
+        print(f"  REQUESTs:   {requests:4d}")
+        print(f"  ACKs:       {acks:4d}")
+        print(f"  NAKs:       {naks:4d}")
+
+        print(f"\nRatio Analysis:")
+
+        # DISCOVER to OFFER ratio
+        if discovers > 0:
+            ratio = offers / discovers
+            print(f"  OFFER/DISCOVER ratio: {ratio:.2f}")
+            if ratio < 0.9:
+                print(f"    ⚠️  Low ratio! Some DISCOVERs not getting OFFERs")
+            elif ratio > 1.1:
+                print(f"    ⚠️  High ratio! Multiple servers or duplicate OFFERs")
+            else:
+                print(f"    ✓  Normal ratio")
+
+        # REQUEST to ACK ratio
+        total_requests = discovers + requests
+        total_acks = acks
+        if total_requests > 0:
+            ratio = total_acks / total_requests
+            print(f"  ACK/REQUEST ratio: {ratio:.2f}")
+            if ratio < 0.9:
+                print(f"    ⚠️  Low ratio! Some REQUESTs not getting ACKs")
+            elif ratio > 1.1:
+                print(f"    ⚠️  High ratio ({ratio:.2f})! Duplicate ACKs detected!")
+                duplicates = total_acks - total_requests
+                print(f"    Estimated duplicate ACKs: ~{duplicates}")
+                print(f"    This suggests the DHCP server is sending multiple ACKs per request")
+            else:
+                print(f"    ✓  Normal ratio")
+
+        # Check for REQUEST without DISCOVER (renewals)
+        if requests > discovers:
+            renewals = requests - discovers
+            print(f"\nRenewal Activity:")
+            print(f"  REQUESTs without DISCOVER: {renewals}")
+            print(f"  (These are likely lease renewals)")
+            if renewals > discovers * 2:
+                print(f"    ⚠️  High renewal activity detected!")
+
+        print("\n" + "="*80 + "\n")
+
+    def do_transaction(self, arg):
+        """Show detailed view of a specific transaction
+        Usage: transaction <xid_hex>
+        Example: transaction fe07547a
+        """
+        if not arg.strip():
+            print("Usage: transaction <xid_hex>")
+            print("Example: transaction fe07547a")
+            return
+
+        # Parse XID
+        try:
+            xid_str = arg.strip().lower().replace('0x', '')
+            xid = int(xid_str, 16)
+        except ValueError:
+            print(f"Invalid transaction ID: {arg}")
+            print("Please provide a hexadecimal value (e.g., fe07547a)")
+            return
+
+        print("\n" + "="*80)
+        print(f"TRANSACTION DETAILS - XID: 0x{xid:08x}")
+        print("="*80)
+
+        # Find all packets with this XID
+        matching_pkts = [p for p in self.dhcp_packets if p['transaction_id'] == xid]
+
+        if not matching_pkts:
+            print(f"\nNo packets found with transaction ID 0x{xid:08x}")
+            print("="*80 + "\n")
+            return
+
+        # Sort by timestamp
+        matching_pkts.sort(key=lambda x: x['timestamp'])
+
+        print(f"\nFound {len(matching_pkts)} packet(s) in this transaction")
+        print(f"Client MAC: {matching_pkts[0]['client_mac']}\n")
+
+        # Display each packet in detail
+        for idx, pkt_info in enumerate(matching_pkts, 1):
+            ts = self.format_timestamp(pkt_info['timestamp'])
+            msg_type = pkt_info['message_type_name']
+
+            print(f"Packet #{idx} - {msg_type}")
+            print(f"{'─'*80}")
+            print(f"  Timestamp:       {ts}")
+            print(f"  Packet Index:    #{pkt_info['index']}")
+            print(f"  Source:          {pkt_info['src_ip']}:{67 if pkt_info['message_type'] in [2,5,6] else 68}")
+            print(f"  Destination:     {pkt_info['dst_ip']}:{68 if pkt_info['message_type'] in [2,5,6] else 67}")
+            print(f"  Client IP:       {pkt_info['client_ip']}")
+            print(f"  Your IP:         {pkt_info['your_ip']}")
+            print(f"  Server IP:       {pkt_info['server_ip']}")
+
+            # Show IP and UDP details
+            ip_id = pkt_info.get('ip_id', 'N/A')
+            ip_flags = pkt_info.get('ip_flags', 'N/A')
+            udp_chksum = pkt_info.get('udp_chksum', 'N/A')
+
+            print(f"  IP ID:           {ip_id}")
+            print(f"  IP Flags:        {ip_flags}")
+            if isinstance(udp_chksum, int):
+                print(f"  UDP Checksum:    0x{udp_chksum:04x}")
+            else:
+                print(f"  UDP Checksum:    {udp_chksum}")
+
+            # Show timing delta if not first packet
+            if idx > 1:
+                time_delta = pkt_info['timestamp'] - matching_pkts[idx-2]['timestamp']
+                print(f"  Time from prev:  {time_delta*1000:.3f}ms")
+
+            # Extract and show DHCP options
+            pkt = pkt_info['packet']
+            if DHCP in pkt:
+                print(f"  DHCP Options:")
+                for opt in pkt[DHCP].options:
+                    if isinstance(opt, tuple):
+                        opt_name = opt[0]
+                        opt_value = opt[1]
+
+                        # Format value
+                        if isinstance(opt_value, bytes):
+                            if opt_name in ['vendor_class_id', 'hostname']:
+                                opt_value = opt_value.decode('utf-8', errors='ignore')
+                            else:
+                                opt_value = opt_value.hex(':')
+                        elif isinstance(opt_value, list):
+                            opt_value = ', '.join(str(v) for v in opt_value)
+
+                        # Special formatting for common options
+                        if opt_name == 'lease_time':
+                            print(f"    {opt_name:20s}: {opt_value}s ({opt_value/3600:.1f} hours)")
+                        else:
+                            value_str = str(opt_value)
+                            if len(value_str) > 60:
+                                value_str = value_str[:60] + "..."
+                            print(f"    {opt_name:20s}: {value_str}")
+
+            print()
+
+        # Detect duplicate responses
+        msg_type_counts = Counter([p['message_type'] for p in matching_pkts])
+        if any(count > 1 for count in msg_type_counts.values()):
+            print("⚠️  WARNING: Duplicate message types detected in this transaction!")
+            for msg_type, count in msg_type_counts.items():
+                if count > 1:
+                    msg_name = DHCP_MESSAGE_TYPES.get(msg_type, 'UNKNOWN')
+                    print(f"    {msg_name}: {count} occurrences")
+
+        print("="*80 + "\n")
+
     def do_help(self, arg):
         """Show available commands"""
         if arg:
@@ -653,14 +1848,31 @@ Type 'exit' or 'quit' to exit.
             print("\n" + "="*80)
             print("AVAILABLE COMMANDS")
             print("="*80)
-            print("\nsummary              - Show overall DHCP packet summary")
+            print("\n=== Overview & Statistics ===")
+            print("summary              - Show overall DHCP packet summary with statistics")
+            print("timings [mac]        - Analyze timing between DHCP messages")
+            print("servers              - List all DHCP servers and their statistics")
+            print("ips [mac]            - Show IP address assignments and usage")
+            print("ratios               - Analyze request/reply ratios for anomalies")
+            print("\n=== Packet Listing & Filtering ===")
             print("list [mac] [limit]   - List all DHCP packets in chronological order")
             print("list_mac [mac]       - List all DORA sequences grouped by MAC address")
-            print("naks [mac]           - Show all DHCP NAK messages (optionally filter by MAC)")
+            print("filter <mac>         - Show all packets for a specific MAC")
+            print("transaction <xid>    - Show detailed view of a specific transaction")
+            print("\n=== Problem Detection ===")
+            print("naks [mac]           - Show all DHCP NAK messages")
             print("dor_nak [mac]        - Find DISCOVER-OFFER-REQUEST-NAK sequences")
             print("failed_dora [mac]    - Count failed DORA attempts per MAC")
-            print("filter <mac>         - Show all packets for a specific MAC")
             print("storms [time] [cnt]  - Detect DHCP storms (default: 10s, 10 msgs)")
+            print("retries [mac]        - Find retransmission patterns")
+            print("conflicts            - Detect IP address conflicts")
+            print("duplicates [ms]      - Detect duplicate server responses (default: 1000ms)")
+            print("checksums            - Analyze UDP checksum issues")
+            print("\n=== Advanced Analysis ===")
+            print("options [mac]        - Parse and display DHCP options")
+            print("vendor [mac]         - Analyze vendor-specific DHCP options (60, 125)")
+            print("renewals [mac]       - Analyze DHCP renewal patterns vs lease times")
+            print("\n=== Help & Exit ===")
             print("help [cmd]           - Show help for a command")
             print("exit / quit          - Exit the program")
             print("\nType 'help <command>' for more details on a specific command")

@@ -2,6 +2,25 @@
 
 Comprehensive tools for analyzing DHCP traffic from both packet captures (pcap/pcapng files) and router log files. Designed to debug DHCP storms, mesh instability, and network issues with TPLink WiFi7 products and other networking equipment.
 
+## What's New in v2.0 🎉
+
+**Six powerful new diagnostic commands** have been added to `dhcp_interactive.py`:
+
+- **`ratios`** - Quick health check for duplicate responses and anomalies
+- **`duplicates [ms]`** - Detect duplicate server responses with timing analysis
+- **`checksums`** - Identify UDP checksum corruption issues
+- **`vendor [mac]`** - Analyze vendor-specific DHCP options (TP-Link, etc.)
+- **`renewals [mac]`** - Detect abnormal DHCP renewal patterns (8640x too frequent!)
+- **`transaction <xid>`** - Deep dive into specific DHCP transactions
+
+These commands helped identify:
+- ✅ Router firmware bug sending duplicate ACKs (3.56:1 ratio)
+- ✅ UDP checksum corruption in first duplicate packet
+- ✅ TP-Link devices renewing every 10 seconds instead of 24 hours
+- ✅ Hardware checksum offloading issues
+
+**See [EXAMPLE_ANALYSIS.md](EXAMPLE_ANALYSIS.md) for a complete real-world analysis!**
+
 ## Tools Included
 
 1. **`dhcp_analyzer.py`** - Batch analysis tool for generating reports from pcap files
@@ -29,15 +48,54 @@ dhcp> list_mac <problem_mac>
 
 ## Installation
 
-### For DHCP Packet Analyzers (pcap files)
+### Quick Setup (Recommended)
 
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+The setup script will:
+- Detect your operating system
+- Install Python dependencies (scapy)
+- Make all scripts executable
+- Optionally install tcpdump and tshark
+
+### Manual Installation
+
+#### For DHCP Packet Analyzers (pcap files)
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install python3-scapy
+```
+
+**Fedora/RHEL/CentOS:**
+```bash
+sudo dnf install python3-scapy
+```
+
+**Using pip:**
 ```bash
 pip install scapy
 ```
 
-### For TPLink Log Analyzer (text logs)
+#### For TPLink Log Analyzer (text logs)
 
 No installation needed - uses Python standard library only!
+
+#### Optional Tools
+
+```bash
+# For packet capture
+sudo apt-get install tcpdump
+
+# For advanced filtering
+sudo apt-get install tshark
+
+# For GUI analysis
+sudo apt-get install wireshark
+```
 
 ---
 
@@ -53,16 +111,45 @@ This launches an interactive shell where you can run multiple analyses without r
 
 ### Available Commands
 
+#### Overview & Statistics
 | Command | Description |
 |---------|-------------|
 | `summary` | Show overall DHCP packet statistics |
+| `timings [mac]` | Analyze timing between DHCP messages |
+| `servers` | List all DHCP servers and their statistics |
+| `ips [mac]` | Show IP address assignments and usage |
+| `ratios` | **NEW!** Analyze request/reply ratios for anomalies |
+
+#### Packet Listing & Filtering
+| Command | Description |
+|---------|-------------|
 | `list [mac] [limit]` | List all DHCP packets in chronological order |
 | `list_mac [mac]` | List all DORA sequences grouped by MAC address |
+| `filter <mac>` | Show all packets for a specific MAC address |
+| `transaction <xid>` | **NEW!** Show detailed view of a specific transaction |
+
+#### Problem Detection
+| Command | Description |
+|---------|-------------|
 | `naks [mac]` | Find all DHCP NAK messages (optionally filter by MAC) |
 | `dor_nak [mac]` | Find DISCOVER→OFFER→REQUEST→NAK sequences |
 | `failed_dora [mac]` | Count failed DORA attempts per MAC with success rates |
-| `filter <mac>` | Show all packets for a specific MAC address |
 | `storms [time] [count]` | Detect DHCP storms (default: 10 msgs in 10s) |
+| `retries [mac]` | Find retransmission patterns |
+| `conflicts` | Detect IP address conflicts |
+| `duplicates [ms]` | **NEW!** Detect duplicate server responses (default: 1000ms) |
+| `checksums` | **NEW!** Analyze UDP checksum issues |
+
+#### Advanced Analysis
+| Command | Description |
+|---------|-------------|
+| `options [mac]` | Parse and display DHCP options |
+| `vendor [mac]` | **NEW!** Analyze vendor-specific DHCP options (60, 125) |
+| `renewals [mac]` | **NEW!** Analyze renewal patterns vs lease times |
+
+#### Help & Exit
+| Command | Description |
+|---------|-------------|
 | `help [cmd]` | Show available commands or help for specific command |
 | `exit` / `quit` | Exit the analyzer |
 
@@ -218,6 +305,161 @@ Detects excessive DHCP traffic:
 - Default: 10+ messages in 10 seconds
 - Customizable thresholds
 - Shows storm duration and message types
+
+#### `duplicates [time_threshold_ms]` **NEW!**
+Detects duplicate DHCP server responses (same transaction ID, same message type):
+- Default: Detects duplicates within 1000ms (1 second)
+- Shows IP ID, IP flags, and UDP checksums for each duplicate
+- Critical for identifying router bugs sending multiple ACKs per request
+- Helps diagnose checksum offloading issues
+
+Example output:
+```
+⚠️  DUPLICATE ACK DETECTED
+Transaction ID: 0xfe07547a
+Time between duplicates: 0.055ms
+Client MAC: 78:20:51:71:14:41
+
+  Packet #1 (pkt index 95):
+    Timestamp: 2026-01-06 00:45:53.789
+    Source: 192.168.88.1 -> Dest: 192.168.88.80
+    IP ID: 56183, IP Flags: DF
+    UDP Checksum: 0x33e0
+    Your IP: 192.168.88.80
+  Packet #2 (pkt index 96):
+    Timestamp: 2026-01-06 00:45:53.789
+    Source: 192.168.88.1 -> Dest: 192.168.88.80
+    IP ID: 43556, IP Flags:
+    UDP Checksum: 0xee36
+    Your IP: 192.168.88.80
+```
+
+#### `checksums` **NEW!**
+Analyzes UDP checksum issues in DHCP packets:
+- Recalculates UDP checksums and compares with original
+- Identifies packets with invalid checksums
+- Critical for diagnosing hardware offloading bugs or network corruption
+- Shows both original and calculated checksums for comparison
+
+#### `vendor [mac]` **NEW!**
+Analyzes vendor-specific DHCP options:
+- Option 60 (Vendor Class ID) - e.g., "TP-Link,dslforum.org"
+- Option 125 (Vendor-Specific Information) - proprietary vendor data
+- Option 12 (Hostname) - device hostnames
+- Helps identify device manufacturers and models
+- Useful for debugging vendor-specific DHCP behaviors
+
+Example output:
+```
+MAC: 78:20:51:71:14:41
+  Hostname(s): HB610V2
+  Vendor Class ID (Option 60):
+    - TP-Link,dslforum.org
+  Vendor-Specific Info (Option 125):
+    [REQUEST] Decoded: Y2572730006920HB610V2
+    [REQUEST] Raw Hex: 00:00:0d:e9:20:01:06:37:38:32:30:35:31:...
+```
+
+#### `renewals [mac]` **NEW!**
+Analyzes DHCP renewal patterns compared to lease times:
+- Calculates average renewal interval
+- Compares with expected T1 (50% of lease) and T2 (87.5% of lease)
+- Detects abnormally aggressive renewal behavior
+- Shows warning if renewal interval is too short
+
+Example output:
+```
+MAC: 78:20:51:71:14:41
+  Total renewal requests: 83
+  Average renewal interval: 10.0s (0.2 minutes)
+  Min interval: 9.8s
+  Max interval: 10.2s
+  Lease time from server: 172800s (48.0 hours)
+  Expected T1 (50% of lease): 86400.0s (24.0 hours)
+  Expected T2 (87.5% of lease): 151200.0s (42.0 hours)
+  ⚠️  WARNING: Renewal interval (10.0s) is abnormally short!
+      Expected around 86400.0s, got 10.0s
+      This is 8640x more frequent than expected!
+```
+
+#### `ratios` **NEW!**
+Analyzes request/reply ratios to detect anomalies:
+- Calculates OFFER/DISCOVER ratio (should be ~1.0)
+- Calculates ACK/REQUEST ratio (should be ~1.0)
+- Detects duplicate server responses
+- Identifies high renewal activity
+
+Example output:
+```
+Message Counts:
+  DISCOVERs:   14
+  OFFERs:      24
+  REQUESTs:   554
+  ACKs:      2024
+  NAKs:        12
+
+Ratio Analysis:
+  OFFER/DISCOVER ratio: 1.71
+    ⚠️  High ratio! Multiple servers or duplicate OFFERs
+  ACK/REQUEST ratio: 3.56
+    ⚠️  High ratio (3.56)! Duplicate ACKs detected!
+    Estimated duplicate ACKs: ~1456
+    This suggests the DHCP server is sending multiple ACKs per request
+
+Renewal Activity:
+  REQUESTs without DISCOVER: 540
+  (These are likely lease renewals)
+    ⚠️  High renewal activity detected!
+```
+
+#### `transaction <xid>` **NEW!**
+Shows detailed view of a specific transaction by transaction ID (XID):
+- Displays all packets in the transaction chronologically
+- Shows complete DHCP options for each packet
+- Displays timing deltas between packets
+- Shows IP IDs, flags, and checksums
+- Detects duplicate message types within transaction
+
+Usage:
+```
+transaction fe07547a          # Using hex XID
+transaction 0xfe07547a        # 0x prefix optional
+```
+
+Example output:
+```
+Found 3 packet(s) in this transaction
+Client MAC: 78:20:51:71:14:41
+
+Packet #1 - REQUEST
+────────────────────────────────────────────────────────────────────────────────
+  Timestamp:       2026-01-06 00:45:53.789
+  Packet Index:    #94
+  Source:          192.168.88.80:68
+  Destination:     192.168.88.1:67
+  Client IP:       192.168.88.80
+  Your IP:         0.0.0.0
+  Server IP:       0.0.0.0
+  IP ID:           41477
+  IP Flags:        DF
+  UDP Checksum:    0x7a23
+  DHCP Options:
+    message-type        : 3
+    max_dhcp_size       : 1024
+    client_id           : 01:78:20:51:71:14:41
+    hostname            : HB610V2
+    vendor_class_id     : TP-Link,dslforum.org
+    lease_time          : 172800s (48.0 hours)
+    [... more options ...]
+
+Packet #2 - ACK
+────────────────────────────────────────────────────────────────────────────────
+  [... similar detailed info ...]
+  Time from prev:  0.394ms
+
+⚠️  WARNING: Duplicate message types detected in this transaction!
+    ACK: 2 occurrences
+```
 
 ---
 
@@ -376,12 +618,18 @@ tcpdump -i eth0 -w capture.pcap port 67 or port 68
 
 ```
 dhcp> summary              # Get overview
+dhcp> ratios               # NEW! Check for duplicate responses and anomalies
 dhcp> list 20              # See first 20 packets chronologically
 dhcp> failed_dora          # Find problematic MACs
+dhcp> duplicates           # NEW! Detect duplicate server responses
+dhcp> renewals             # NEW! Check for abnormal renewal patterns
 dhcp> list_mac <mac>       # See all DORA sequences for problem device
 dhcp> filter <problem_mac> # Deep dive into problem device
+dhcp> vendor <mac>         # NEW! Check vendor-specific options
+dhcp> transaction <xid>    # NEW! Detailed view of specific transaction
 dhcp> dor_nak <mac>        # See why leases are rejected
 dhcp> naks <mac>           # Review all rejections
+dhcp> checksums            # NEW! Check for UDP checksum issues
 dhcp> storms               # Check for retry loops
 ```
 
@@ -469,8 +717,10 @@ Multiple devices unable to obtain DHCP leases, causing continuous retry storms.
 ### Documentation
 - `README.md` - This file (main documentation)
 - `TPLINK_LOG_ANALYZER_GUIDE.md` - Detailed guide for TPLink log analyzer
+- `EXAMPLE_ANALYSIS.md` - **NEW!** Real-world example analysis showing new diagnostic features
 
-### Utilities
+### Setup & Utilities
+- `setup.sh` - **NEW!** Automated setup script for installing dependencies
 - `tshark_examples.sh` - tshark command reference
 
 ---
