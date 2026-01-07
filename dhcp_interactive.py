@@ -1453,29 +1453,117 @@ Type 'exit' or 'quit' to exit.
             print("  • Router firmware issues")
             print("  • Network interface card problems\n")
 
-            # Limit output to first 20 to avoid overwhelming
-            display_count = min(len(checksum_issues), 20)
+            # Categorize by origin (server vs client)
+            server_bad = []
+            client_bad = []
+            unknown_origin = []
 
-            for issue in checksum_issues[:display_count]:
+            for issue in checksum_issues:
                 pkt_info = issue['pkt_info']
-                ts = self.format_timestamp(pkt_info['timestamp'])
-                msg_type = pkt_info['message_type_name']
+                msg_type = pkt_info['message_type']
+                src_ip = pkt_info['src_ip']
 
-                print(f"  Packet #{pkt_info['index']} [{ts}] {msg_type}")
-                print(f"    {pkt_info['src_ip']} -> {pkt_info['dst_ip']}")
-                print(f"    Original checksum:   0x{issue['original']:04x}")
-                print(f"    Calculated checksum: 0x{issue['calculated']:04x}")
-                print(f"    Transaction ID: 0x{pkt_info['transaction_id']:08x}")
+                # Determine origin based on message type (most reliable)
+                # Server → Client: OFFER (2), ACK (5), NAK (6)
+                # Client → Server: DISCOVER (1), REQUEST (3), DECLINE (4), RELEASE (7), INFORM (8)
+                if msg_type in [2, 5, 6]:  # Server messages
+                    server_bad.append(issue)
+                elif msg_type in [1, 3, 4, 7, 8]:  # Client messages
+                    client_bad.append(issue)
+                else:
+                    unknown_origin.append(issue)
+
+            print(f"📊 CHECKSUM ISSUES BY ORIGIN:\n")
+            print(f"  Server → Client: {len(server_bad)} packets ({len(server_bad)/len(checksum_issues)*100:.1f}%)")
+            print(f"  Client → Server: {len(client_bad)} packets ({len(client_bad)/len(checksum_issues)*100:.1f}%)")
+            if unknown_origin:
+                print(f"  Unknown origin:  {len(unknown_origin)} packets\n")
+            else:
                 print()
 
-            if len(checksum_issues) > display_count:
-                print(f"  ... and {len(checksum_issues) - display_count} more packets with bad checksums\n")
+            # Show server-originated bad checksums
+            if server_bad:
+                print(f"⚠️  SERVER-ORIGINATED BAD CHECKSUMS ({len(server_bad)} packets):\n")
+                print("These packets were sent BY the DHCP server (192.168.88.1)")
+                print("This indicates a router/server firmware or hardware issue.\n")
 
-            # Analyze pattern
+                display_count = min(len(server_bad), 10)
+                for issue in server_bad[:display_count]:
+                    pkt_info = issue['pkt_info']
+                    ts = self.format_timestamp(pkt_info['timestamp'])
+                    msg_type = pkt_info['message_type_name']
+
+                    print(f"  Packet #{pkt_info['index']} [{ts}] {msg_type}")
+                    print(f"    Direction: SERVER → Client")
+                    print(f"    Server IP: {pkt_info['src_ip']} (port 67)")
+                    print(f"    Client IP: {pkt_info['dst_ip']} (port 68)")
+                    print(f"    Original checksum:   0x{issue['original']:04x}")
+                    print(f"    Calculated checksum: 0x{issue['calculated']:04x}")
+                    print(f"    Transaction ID: 0x{pkt_info['transaction_id']:08x}")
+                    print()
+
+                if len(server_bad) > display_count:
+                    print(f"  ... and {len(server_bad) - display_count} more server packets with bad checksums\n")
+
+            # Show client-originated bad checksums
+            if client_bad:
+                print(f"⚠️  CLIENT-ORIGINATED BAD CHECKSUMS ({len(client_bad)} packets):\n")
+                print("These packets were sent BY DHCP clients")
+                print("This may indicate client NIC issues or client-side bugs.\n")
+
+                display_count = min(len(client_bad), 10)
+                for issue in client_bad[:display_count]:
+                    pkt_info = issue['pkt_info']
+                    ts = self.format_timestamp(pkt_info['timestamp'])
+                    msg_type = pkt_info['message_type_name']
+                    client_mac = pkt_info['client_mac']
+
+                    print(f"  Packet #{pkt_info['index']} [{ts}] {msg_type}")
+                    print(f"    Direction: Client → SERVER")
+                    print(f"    Client MAC: {client_mac}")
+                    print(f"    Client IP: {pkt_info['src_ip']} (port 68)")
+                    print(f"    Server IP: {pkt_info['dst_ip']} (port 67)")
+                    print(f"    Original checksum:   0x{issue['original']:04x}")
+                    print(f"    Calculated checksum: 0x{issue['calculated']:04x}")
+                    print(f"    Transaction ID: 0x{pkt_info['transaction_id']:08x}")
+                    print()
+
+                if len(client_bad) > display_count:
+                    print(f"  ... and {len(client_bad) - display_count} more client packets with bad checksums\n")
+
+            # Analyze pattern by message type
+            print("📋 BREAKDOWN BY MESSAGE TYPE:\n")
             bad_msg_types = Counter([issue['pkt_info']['message_type_name'] for issue in checksum_issues])
-            print("Message types with bad checksums:")
             for msg_type, count in bad_msg_types.most_common():
-                print(f"  {msg_type}: {count} packets")
+                percentage = (count / len(checksum_issues)) * 100
+
+                # Determine if server or client message
+                if msg_type in ['OFFER', 'ACK', 'NAK']:
+                    origin = "Server → Client"
+                elif msg_type in ['DISCOVER', 'REQUEST', 'DECLINE', 'RELEASE', 'INFORM']:
+                    origin = "Client → Server"
+                else:
+                    origin = "Unknown"
+
+                print(f"  {msg_type:10s}: {count:4d} packets ({percentage:5.1f}%) [{origin}]")
+
+            # Conclusion
+            print(f"\n💡 DIAGNOSIS:\n")
+            if len(server_bad) > len(client_bad) * 2:
+                print(f"  PRIMARY ISSUE: DHCP Server (router) hardware/firmware bug")
+                print(f"  • {len(server_bad)} bad checksums from server vs {len(client_bad)} from clients")
+                print(f"  • Likely hardware checksum offloading issue in router")
+                print(f"  • Recommendation: Update router firmware or disable offloading")
+            elif len(client_bad) > len(server_bad) * 2:
+                print(f"  PRIMARY ISSUE: Client-side network interface issues")
+                print(f"  • {len(client_bad)} bad checksums from clients vs {len(server_bad)} from server")
+                print(f"  • Check client network adapters")
+                print(f"  • May indicate faulty NICs or driver issues")
+            else:
+                print(f"  MIXED ISSUE: Both server and clients have checksum problems")
+                print(f"  • Server: {len(server_bad)} packets")
+                print(f"  • Clients: {len(client_bad)} packets")
+                print(f"  • May indicate network infrastructure issues")
 
         else:
             print("\n✓ All checksums are valid (or disabled)")
