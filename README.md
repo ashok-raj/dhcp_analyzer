@@ -24,6 +24,19 @@ These commands helped identify:
 
 **See also: [EXAMPLE_ANALYSIS.md](EXAMPLE_ANALYSIS.md) for a step-by-step analysis walkthrough!**
 
+## 📚 Documentation & Explanations
+
+Detailed analysis documents explaining the findings:
+
+- **[COMPLETE_ANALYSIS_SUMMARY.md](COMPLETE_ANALYSIS_SUMMARY.md)** - Complete analysis with all three issues documented
+- **[ICMP_PORT_UNREACHABLE_FINDING.md](ICMP_PORT_UNREACHABLE_FINDING.md)** - Resolves "8 DHCP servers" mystery (ICMP errors, not actual servers)
+- **[SATELLITE_DHCP_EXPLAINED.md](SATELLITE_DHCP_EXPLAINED.md)** - How satellites renew their own management IPs (explains dual-role behavior)
+- **[T1_T2_SPEC_EXPLAINED.md](T1_T2_SPEC_EXPLAINED.md)** - RFC 2131 specification for T1/T2 timers with detailed explanations
+- **[ROOT_CAUSE_ANALYSIS.md](ROOT_CAUSE_ANALYSIS.md)** - Deep dive into 10-second renewal bug and missing T1/T2 options
+- **[PACKET_ORIGIN_GUIDE.md](PACKET_ORIGIN_GUIDE.md)** - How to determine if packets come from server or client
+- **[EXAMPLE_ANALYSIS.md](EXAMPLE_ANALYSIS.md)** - Step-by-step walkthrough of real-world analysis
+- **[test_hypothesis.sh](test_hypothesis.sh)** - Testing procedure to verify fixes
+
 ## Tools Included
 
 1. **`dhcp_analyzer.py`** - Batch analysis tool for generating reports from pcap files
