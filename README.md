@@ -18,15 +18,19 @@ These commands helped identify:
 - ✅ UDP checksum corruption in first duplicate packet
 - ✅ TP-Link devices renewing every 10 seconds instead of 24 hours
 - ✅ Hardware checksum offloading issues
+- ✅ **NEW:** Satellites rejecting duplicate ACKs via ICMP Port Unreachable (see [ICMP_PORT_UNREACHABLE_FINDING.md](ICMP_PORT_UNREACHABLE_FINDING.md))
 
-**See [EXAMPLE_ANALYSIS.md](EXAMPLE_ANALYSIS.md) for a complete real-world analysis!**
+**📊 [COMPLETE_ANALYSIS_SUMMARY.md](COMPLETE_ANALYSIS_SUMMARY.md) - Full analysis of test1.pcap with all findings**
+
+**See also: [EXAMPLE_ANALYSIS.md](EXAMPLE_ANALYSIS.md) for a step-by-step analysis walkthrough!**
 
 ## Tools Included
 
 1. **`dhcp_analyzer.py`** - Batch analysis tool for generating reports from pcap files
 2. **`dhcp_interactive.py`** - Interactive shell for exploring DHCP packets from pcap files
-3. **`tplink_log_analyzer.py`** - Analyzer for TPLink router log files (text logs)
-4. **`tshark_examples.sh`** - Quick reference for tshark commands
+3. **`identify_icmp_dhcp.py`** - Distinguish real DHCP packets from ICMP-embedded DHCP packets
+4. **`tplink_log_analyzer.py`** - Analyzer for TPLink router log files (text logs)
+5. **`tshark_examples.sh`** - Quick reference for tshark commands
 
 ## Quick Start
 

@@ -1,3 +1,26 @@
+# ⚠️ SUPERSEDED ANALYSIS - DO NOT USE
+
+**This document contains an INCORRECT analysis that has been superseded.**
+
+**Please refer to: ICMP_PORT_UNREACHABLE_FINDING.md for the CORRECT analysis**
+
+---
+
+**What this document claimed**: TP-Link HB610V2 satellites were reflecting/relaying DHCP ACK packets back to the server.
+
+**What was actually happening**: Satellites were sending ICMP Port Unreachable errors in response to duplicate DHCP ACKs. Scapy parsed the DHCP packets embedded in ICMP errors, making them appear as ACKs from satellites.
+
+**Discovery date of error**: 2026-01-07
+**Corrected analysis**: ICMP_PORT_UNREACHABLE_FINDING.md
+
+---
+
+## Original (Incorrect) Document Below
+
+This document is preserved for historical context only.
+
+---
+
 # DHCP Packet Reflection Bug - TP-Link HB610V2
 
 ## Critical Discovery

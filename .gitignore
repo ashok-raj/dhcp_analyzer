@@ -3,6 +3,7 @@
 *.rpm
 *.exe
 *.msi
+*.bin
 
 # Temporary files
 *.exp
@@ -25,6 +26,14 @@ capture_session.exp
 tplink_*.exp
 log*.summary
 tp-*.summary
+
+# Debug and log files (txt)
+*debug*.txt
+*log*.txt
+Log_*.txt
+IP_SCAN.txt
+test*_analysis.txt
+tftp_receiver.py
 
 # IDE files
 .vscode/
