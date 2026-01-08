@@ -115,6 +115,24 @@ else
     fi
 fi
 
+# Install tftpy for TFTP receiver (optional)
+if python_package_exists tftpy; then
+    echo -e "${GREEN}✓${NC} tftpy already installed"
+else
+    echo "tftpy not installed (optional, needed for tftp_receiver.py)"
+    read -p "Install tftpy now? (y/n) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "Installing tftpy..."
+        python3 -m pip install --user tftpy
+        if python_package_exists tftpy; then
+            echo -e "${GREEN}✓${NC} tftpy installed successfully"
+        else
+            echo -e "${YELLOW}!${NC} Failed to install tftpy (you can install it later with: pip3 install tftpy)"
+        fi
+    fi
+fi
+
 echo ""
 echo "================================================================================"
 echo "  Making Scripts Executable"
@@ -125,6 +143,8 @@ echo ""
 chmod +x dhcp_interactive.py 2>/dev/null && echo -e "${GREEN}✓${NC} dhcp_interactive.py" || echo -e "${YELLOW}!${NC} dhcp_interactive.py not found"
 chmod +x dhcp_analyzer.py 2>/dev/null && echo -e "${GREEN}✓${NC} dhcp_analyzer.py" || echo -e "${YELLOW}!${NC} dhcp_analyzer.py not found"
 chmod +x tplink_log_analyzer.py 2>/dev/null && echo -e "${GREEN}✓${NC} tplink_log_analyzer.py" || echo -e "${YELLOW}!${NC} tplink_log_analyzer.py not found"
+chmod +x tftp_receiver.py 2>/dev/null && echo -e "${GREEN}✓${NC} tftp_receiver.py" || echo -e "${YELLOW}!${NC} tftp_receiver.py not found"
+chmod +x identify_icmp_dhcp.py 2>/dev/null && echo -e "${GREEN}✓${NC} identify_icmp_dhcp.py" || echo -e "${YELLOW}!${NC} identify_icmp_dhcp.py not found"
 
 echo ""
 echo "================================================================================"
@@ -181,16 +201,20 @@ echo -e "${GREEN}All required dependencies are installed.${NC}"
 echo ""
 echo "Quick start:"
 echo ""
-echo "  1. Capture DHCP traffic:"
+echo "  1. Get logs from HB810 router:"
+echo "     sudo ./tftp_receiver.py"
+echo "     (Then export logs from router web interface)"
+echo ""
+echo "  2. Capture DHCP traffic:"
 echo "     sudo tcpdump -i eth0 -w capture.pcap port 67 or port 68"
 echo ""
-echo "  2. Analyze with interactive tool (RECOMMENDED):"
+echo "  3. Analyze with interactive tool (RECOMMENDED):"
 echo "     ./dhcp_interactive.py capture.pcap"
 echo ""
-echo "  3. Or use batch analyzer:"
+echo "  4. Or use batch analyzer:"
 echo "     ./dhcp_analyzer.py capture.pcap"
 echo ""
-echo "  4. For TPLink router logs:"
+echo "  5. For TPLink router logs:"
 echo "     ./tplink_log_analyzer.py router.log"
 echo ""
 echo "For more information, see README.md"

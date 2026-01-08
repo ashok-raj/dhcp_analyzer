@@ -43,7 +43,8 @@ Detailed analysis documents explaining the findings:
 2. **`dhcp_interactive.py`** - Interactive shell for exploring DHCP packets from pcap files
 3. **`identify_icmp_dhcp.py`** - Distinguish real DHCP packets from ICMP-embedded DHCP packets
 4. **`tplink_log_analyzer.py`** - Analyzer for TPLink router log files (text logs)
-5. **`tshark_examples.sh`** - Quick reference for tshark commands
+5. **`tftp_receiver.py`** - TFTP server to receive logs/configs from HB810 router
+6. **`tshark_examples.sh`** - Quick reference for tshark commands
 
 ## Quick Start
 
@@ -61,6 +62,12 @@ dhcp> list_mac <problem_mac>
 ./tplink_log_analyzer.py router.log
 ./tplink_log_analyzer.py router.log --mac <problem_mac>
 ./tplink_log_analyzer.py router.log --storms
+```
+
+**Want to get logs from HB810 router?**
+```bash
+sudo ./tftp_receiver.py
+# Then trigger log export from router web interface
 ```
 
 ## Installation
@@ -591,7 +598,124 @@ For detailed guide, see **[TPLINK_LOG_ANALYZER_GUIDE.md](TPLINK_LOG_ANALYZER_GUI
 
 ---
 
-## Tool 4: tshark Reference
+## Tool 4: TFTP Receiver
+
+A simple TFTP server to receive logs, configuration backups, and firmware files from your HB810 router.
+
+### Why Use This?
+
+The TP-Link HB810 router can export logs and configuration files via TFTP, making it easy to:
+- Download system logs for analysis
+- Backup router configuration
+- Retrieve debug information
+- Get firmware files
+
+This is much simpler than accessing the router's web interface and manually downloading files.
+
+### Quick Start
+
+```bash
+# Start TFTP receiver (requires root for port 69)
+sudo ./tftp_receiver.py
+```
+
+The server will:
+- Listen on port 69 (standard TFTP port)
+- Save incoming files to the current directory
+- Display progress for each transfer
+
+### Using with HB810 Router
+
+**Step 1: Start TFTP receiver on your Linux system**
+```bash
+cd /home/user/router_logs
+sudo ./tftp_receiver.py
+```
+
+**Step 2: Configure router to send logs**
+- Access HB810 web interface (usually http://192.168.88.1)
+- Go to System Tools → System Log
+- Set TFTP Server IP to your Linux system IP
+- Click "Save Logs" or "Backup Config"
+
+**Step 3: Files download automatically**
+```
+Starting TFTP receiver on port 69
+Files will be saved to: /home/user/router_logs
+Waiting for incoming transfers... (Press Ctrl+C to stop)
+
+Receiving file: system_log.txt (12.5 KB)
+Transfer complete: system_log.txt
+```
+
+### Installation Requirements
+
+```bash
+# Install tftpy library
+pip install tftpy
+
+# Or using system package manager
+sudo apt-get install python3-pip
+pip3 install tftpy
+```
+
+### Common Use Cases
+
+**Get system logs for DHCP analysis:**
+```bash
+# Start receiver
+sudo ./tftp_receiver.py
+
+# Router sends: tplink_log_20260107.txt
+# Then analyze with:
+./tplink_log_analyzer.py tplink_log_20260107.txt
+```
+
+**Backup router configuration:**
+```bash
+# Start receiver
+sudo ./tftp_receiver.py
+
+# Router sends: backup_config.bin
+# File saved for safekeeping
+```
+
+**Retrieve packet captures (if router supports):**
+```bash
+# Start receiver
+sudo ./tftp_receiver.py
+
+# Router sends: dhcp_capture.pcap
+# Then analyze with:
+./dhcp_interactive.py dhcp_capture.pcap
+```
+
+### Troubleshooting
+
+**Permission denied error:**
+```
+Run with sudo: sudo ./tftp_receiver.py
+Port 69 requires root privileges
+```
+
+**Firewall blocking:**
+```bash
+# Allow TFTP through firewall
+sudo ufw allow 69/udp
+```
+
+**Router can't connect:**
+```bash
+# Verify your Linux system IP
+ip addr show
+
+# Test connectivity
+ping <router_ip>
+```
+
+---
+
+## Tool 5: tshark Reference
 
 Quick reference for using tshark directly:
 
