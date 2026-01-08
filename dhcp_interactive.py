@@ -1236,12 +1236,20 @@ Type 'exit' or 'quit' to exit.
             print(f"\n{msg_type} Messages:")
             print("-" * 80)
 
-            for opt_name in sorted(options.keys()):
-                values = options[opt_name]
+            # Sort options: named options first (alphabetically), then numbered options
+            named_opts = [(k, v) for k, v in options.items() if isinstance(k, str)]
+            numbered_opts = [(k, v) for k, v in options.items() if isinstance(k, int)]
+
+            sorted_opts = sorted(named_opts, key=lambda x: x[0]) + sorted(numbered_opts, key=lambda x: x[0])
+
+            for opt_name, values in sorted_opts:
+                # Format option name (convert int option codes to readable format)
+                opt_display = str(opt_name) if isinstance(opt_name, str) else f"Option {opt_name}"
+
                 if len(values) == 1:
-                    print(f"  {opt_name:30s}: {list(values)[0]}")
+                    print(f"  {opt_display:30s}: {list(values)[0]}")
                 else:
-                    print(f"  {opt_name:30s}: (multiple values)")
+                    print(f"  {opt_display:30s}: (multiple values)")
                     for val in sorted(values):
                         print(f"    - {val}")
 
