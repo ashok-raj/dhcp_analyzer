@@ -43,8 +43,11 @@ Detailed analysis documents explaining the findings:
 2. **`dhcp_interactive.py`** - Interactive shell for exploring DHCP packets from pcap files
 3. **`identify_icmp_dhcp.py`** - Distinguish real DHCP packets from ICMP-embedded DHCP packets
 4. **`tplink_log_analyzer.py`** - Analyzer for TPLink router log files (text logs)
-5. **`tftp_receiver.py`** - TFTP server to receive logs/configs from HB810 router
-6. **`tshark_examples.sh`** - Quick reference for tshark commands
+5. **`capture_all_satellites.sh`** - Multi-device capture orchestrator with auto-discovery
+6. **`scan_satellites.py`** - Network scanner for auto-discovering TP-Link devices
+7. **`tplink_multi_capture.exp`** - Individual device capture script with TFTP transfer
+8. **`tftp_receiver.py`** - TFTP server to receive logs/configs/captures from devices
+9. **`tshark_examples.sh`** - Quick reference for tshark commands
 
 ## Quick Start
 
@@ -62,6 +65,20 @@ dhcp> list_mac <problem_mac>
 ./tplink_log_analyzer.py router.log
 ./tplink_log_analyzer.py router.log --mac <problem_mac>
 ./tplink_log_analyzer.py router.log --storms
+```
+
+**Want to capture from all satellites simultaneously?**
+```bash
+# First time: Auto-discover satellites
+sudo ./capture_all_satellites.sh --scan
+
+# Basic: 15 minutes, all TFTP at once
+sudo ./capture_all_satellites.sh
+
+# Recommended: 15 minutes with staggered TFTP transfers
+sudo ./capture_all_satellites.sh 900 --stagger 10
+
+# Press Ctrl+C to stop early
 ```
 
 **Want to get logs from HB810 router?**
@@ -598,7 +615,123 @@ For detailed guide, see **[TPLINK_LOG_ANALYZER_GUIDE.md](TPLINK_LOG_ANALYZER_GUI
 
 ---
 
-## Tool 4: TFTP Receiver
+## Tool 4: Multi-Satellite Capture System
+
+Simultaneously capture DHCP traffic from the main HB810 router and all 6 HB610V2 satellites with extended 15-minute capture duration and Ctrl+C early termination support.
+
+### Quick Start
+
+```bash
+# First time: Auto-discover satellites and save configuration
+sudo ./capture_all_satellites.sh --scan
+
+# Basic: 15 minutes, simultaneous TFTP transfers
+sudo ./capture_all_satellites.sh
+
+# Recommended: 15 minutes with staggered TFTP (more reliable)
+sudo ./capture_all_satellites.sh 900 --stagger 10
+
+# Sequential TFTP transfers (most reliable, slowest)
+sudo ./capture_all_satellites.sh 900 --sequential
+
+# Custom duration (5 minutes)
+sudo ./capture_all_satellites.sh 300 --stagger 10
+
+# Press Ctrl+C at any time to stop all captures early
+```
+
+### Auto-Discovery
+
+The system automatically discovers TP-Link satellites on your network:
+
+```bash
+sudo ./capture_all_satellites.sh --scan
+```
+
+This will:
+- Scan network for TP-Link devices (MAC: 78:20:51, 50:3d:d1, f0:f6:c1)
+- Identify HB810 router and HB610V2 satellites
+- Save discovered devices to `satellites.conf`
+- Validate devices before each capture
+
+**Smart Features:**
+- Uses saved configuration automatically
+- Validates devices with ping before capture
+- Skips unreachable devices with warning
+- Falls back to defaults if no config exists
+
+### Features
+
+- **Parallel Capture**: Captures from 7 devices simultaneously (1 main + 6 satellites)
+- **Extended Duration**: 15-minute capture window (configurable)
+- **Early Termination**: Press Ctrl+C to stop all captures before timeout
+- **Unique Filenames**: Each device gets a uniquely named capture file
+- **Automatic TFTP**: TFTP receiver starts automatically and collects all captures
+- **Organized Output**: All files saved in timestamped session directory
+
+### Devices Captured
+
+| Device Type | IP Address | Filename Pattern |
+|------------|------------|------------------|
+| HB810 (Main) | 192.168.88.1 | `dhcp_main_router_*.pcap` |
+| HB610V2 Sat | 192.168.88.27 | `dhcp_satellite_27_*.pcap` |
+| HB610V2 Sat | 192.168.88.58 | `dhcp_satellite_58_*.pcap` |
+| HB610V2 Sat | 192.168.88.59 | `dhcp_satellite_59_*.pcap` |
+| HB610V2 Sat | 192.168.88.79 | `dhcp_satellite_79_*.pcap` |
+| HB610V2 Sat | 192.168.88.80 | `dhcp_satellite_80_*.pcap` |
+| HB610V2 Sat | 192.168.88.87 | `dhcp_satellite_87_*.pcap` |
+
+**Note**: The numbers (27, 58, 59, 79, 80, 87) are the last octet of each satellite's IP address.
+
+### Output Structure
+
+```
+capture_session_20260109_143000/
+├── dhcp_main_router_20260109_143000.pcap      (from 192.168.88.1)
+├── dhcp_satellite_27_20260109_143000.pcap     (from 192.168.88.27)
+├── dhcp_satellite_58_20260109_143000.pcap     (from 192.168.88.58)
+├── dhcp_satellite_59_20260109_143000.pcap     (from 192.168.88.59)
+├── dhcp_satellite_79_20260109_143000.pcap     (from 192.168.88.79)
+├── dhcp_satellite_80_20260109_143000.pcap     (from 192.168.88.80)
+├── dhcp_satellite_87_20260109_143000.pcap     (from 192.168.88.87)
+└── tftp_receiver.log
+
+Session logs (in main directory):
+├── capture_main_router_20260109_143000.log
+├── capture_satellite_27_20260109_143000.log
+└── ...
+```
+
+### What Gets Transferred?
+
+Each satellite/router:
+1. Captures DHCP traffic locally to `/tmp/<capture_file>.pcap`
+2. Transfers the PCAP file via TFTP to your client machine (192.168.88.32)
+3. Deletes the temporary file from the device
+4. Expect session logs remain on the client machine running the script
+
+### Requirements
+
+- Root access (required for TFTP server on port 69)
+- Python 3 with `tftpy` module: `pip3 install tftpy`
+- `expect` package installed
+- Network access to all devices
+- Your Linux system configured as 192.168.88.32 (or edit scripts to change TFTP server IP)
+
+### Files
+
+- `capture_all_satellites.sh` - Master orchestration script with auto-discovery
+- `scan_satellites.py` - Network scanner for finding TP-Link devices
+- `tplink_multi_capture.exp` - Individual device capture script
+- `tftp_receiver.py` - TFTP server for receiving captures
+- `satellites.conf` - Auto-generated device configuration
+- `MULTI_CAPTURE_GUIDE.md` - Detailed documentation
+
+For complete documentation, see **[MULTI_CAPTURE_GUIDE.md](MULTI_CAPTURE_GUIDE.md)**
+
+---
+
+## Tool 5: TFTP Receiver
 
 A simple TFTP server to receive logs, configuration backups, and firmware files from your HB810 router.
 
@@ -715,7 +848,7 @@ ping <router_ip>
 
 ---
 
-## Tool 5: tshark Reference
+## Tool 6: tshark Reference
 
 Quick reference for using tshark directly:
 
@@ -857,8 +990,10 @@ Multiple devices unable to obtain DHCP leases, causing continuous retry storms.
 
 ### Documentation
 - `README.md` - This file (main documentation)
+- `MULTI_CAPTURE_GUIDE.md` - **NEW!** Detailed guide for multi-satellite capture system
+- `CAPTURE_WORKFLOW.md` - **NEW!** Complete workflow from discovery to analysis
 - `TPLINK_LOG_ANALYZER_GUIDE.md` - Detailed guide for TPLink log analyzer
-- `EXAMPLE_ANALYSIS.md` - **NEW!** Real-world example analysis showing new diagnostic features
+- `EXAMPLE_ANALYSIS.md` - Real-world example analysis showing new diagnostic features
 
 ### Setup & Utilities
 - `setup.sh` - **NEW!** Automated setup script for installing dependencies
