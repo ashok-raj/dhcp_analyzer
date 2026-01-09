@@ -43,3 +43,10 @@ test*_analysis.txt
 # OS files
 .DS_Store
 Thumbs.db
+
+# Generated configuration files
+satellites.conf
+satellites.conf.backup.*
+
+# Capture session directories
+capture_session_*/

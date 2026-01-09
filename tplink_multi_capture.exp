@@ -1,0 +1,180 @@
+#!/usr/bin/expect -f
+#
+# TP-Link Multi-Device DHCP Capture Script
+# Usage: ./tplink_multi_capture.exp <router_ip> <password> <device_name> <duration_seconds> <capture_file> [tftp_delay]
+#
+
+if {$argc < 5 || $argc > 6} {
+    puts "Usage: $argv0 <router_ip> <password> <device_name> <duration_seconds> <capture_file> \[tftp_delay\]"
+    puts "Example: $argv0 192.168.88.27 Password1 satellite_27 900 capture_sat27.pcap"
+    puts "         $argv0 192.168.88.27 Password1 satellite_27 900 capture_sat27.pcap 10"
+    puts ""
+    puts "Parameters:"
+    puts "  tftp_delay  - Optional: seconds to wait before TFTP transfer (default: 0)"
+    exit 1
+}
+
+set router [lindex $argv 0]
+set password [lindex $argv 1]
+set device_name [lindex $argv 2]
+set duration [lindex $argv 3]
+set capture_file [lindex $argv 4]
+set tftp_delay 0
+if {$argc == 6} {
+    set tftp_delay [lindex $argv 5]
+}
+
+set timeout 30
+set tftp_server "192.168.88.32"
+
+# Create timestamped log file
+set timestamp [clock format [clock seconds] -format "%Y%m%d_%H%M%S"]
+set logfile "capture_${device_name}_$timestamp.log"
+
+log_file -a $logfile
+log_user 1
+
+puts "\n=========================================="
+puts "Starting capture on $device_name ($router)"
+puts "Duration: ${duration}s"
+puts "Capture file: $capture_file"
+puts "==========================================\n"
+
+# Connect to router
+spawn telnet $router
+match_max 100000
+
+# Login
+expect {
+    timeout {
+        puts "\[$device_name\] ERROR: Connection timeout"
+        exit 1
+    }
+    eof {
+        puts "\[$device_name\] ERROR: Connection closed"
+        exit 1
+    }
+    "password:" {
+        send "$password\r"
+    }
+}
+
+# Wait for TP-Link prompt
+expect {
+    timeout {
+        puts "\[$device_name\] ERROR: Login failed"
+        exit 1
+    }
+    "TP-Link>" {
+        puts "\[$device_name\] ✓ Logged in successfully"
+    }
+}
+
+# Enter shell mode
+puts "\[$device_name\] Entering shell mode..."
+send "sh\r"
+expect "# "
+
+# Check interface
+puts "\[$device_name\] Checking br0 interface..."
+send "ifconfig br0\r"
+expect "# "
+
+# Change to /tmp directory
+puts "\[$device_name\] Changing to /tmp directory..."
+send "cd /tmp\r"
+expect "# "
+
+# Start tcpdump capture
+puts "\[$device_name\] Starting tcpdump on br0..."
+send "tcpdump -i br0 -w $capture_file port 67 or port 68\r"
+
+expect {
+    timeout {
+        puts "\[$device_name\] WARNING: tcpdump may not have started properly"
+    }
+    "listening on br0" {
+        puts "\[$device_name\] ✓ Capture started successfully"
+    }
+}
+
+# Capture for specified duration
+puts "\[$device_name\] Capturing for ${duration} seconds..."
+puts "\[$device_name\] (Press Ctrl+C in master script to stop early)"
+
+# Set up signal handler for interruption
+trap {
+    puts "\n\[$device_name\] Received interrupt signal, stopping capture..."
+    send "\003"
+    expect "# "
+    set interrupted 1
+} SIGINT SIGTERM
+
+set interrupted 0
+set start_time [clock seconds]
+
+# Wait for duration or interruption
+while {$interrupted == 0} {
+    set elapsed [expr {[clock seconds] - $start_time}]
+    if {$elapsed >= $duration} {
+        break
+    }
+    sleep 1
+}
+
+# Stop capture with Ctrl+C
+puts "\n\[$device_name\] Stopping capture..."
+send "\003"
+expect "# "
+sleep 2
+
+# Check if file was created
+puts "\[$device_name\] Verifying capture file..."
+send "ls -lh $capture_file\r"
+expect "# "
+
+# Wait before TFTP transfer if delay specified
+if {$tftp_delay > 0} {
+    puts "\[$device_name\] Waiting ${tftp_delay}s before TFTP transfer (staggered mode)..."
+    sleep $tftp_delay
+}
+
+# Transfer file via TFTP
+puts "\[$device_name\] Transferring $capture_file to $tftp_server via TFTP..."
+send "tftp -pl $capture_file $tftp_server\r"
+
+# Wait for transfer to complete
+expect {
+    timeout {
+        puts "\[$device_name\] WARNING: TFTP transfer timeout"
+    }
+    "100%" {
+        puts "\[$device_name\] ✓ Transfer completed successfully"
+    }
+    "# " {
+        puts "\[$device_name\] ✓ Transfer command completed"
+    }
+}
+expect "# "
+sleep 1
+
+# Clean up - remove the pcap file from router
+puts "\[$device_name\] Cleaning up temporary file..."
+send "rm $capture_file\r"
+expect "# "
+
+# Exit shell mode
+puts "\[$device_name\] Exiting shell mode..."
+send "exit\r"
+expect "TP-Link>"
+
+# Logout
+puts "\[$device_name\] Logging out..."
+send "logout\r"
+expect eof
+
+puts "\n=========================================="
+puts "\[$device_name\] Capture completed!"
+puts "File should be on TFTP server: $capture_file"
+puts "Session log: $logfile"
+puts "=========================================="
