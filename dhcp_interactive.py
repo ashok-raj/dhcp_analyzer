@@ -1500,9 +1500,11 @@ Type 'exit' or 'quit' to exit.
                     pkt_info = issue['pkt_info']
                     ts = self.format_timestamp(pkt_info['timestamp'])
                     msg_type = pkt_info['message_type_name']
+                    client_mac = pkt_info['client_mac']
 
                     print(f"  Packet #{pkt_info['index']} [{ts}] {msg_type}")
                     print(f"    Direction: SERVER → Client")
+                    print(f"    Client MAC: {client_mac}")
                     print(f"    Server IP: {pkt_info['src_ip']} (port 67)")
                     print(f"    Client IP: {pkt_info['dst_ip']} (port 68)")
                     print(f"    Original checksum:   0x{issue['original']:04x}")

@@ -16,17 +16,19 @@ CONFIG_FILE="satellites.conf"
 
 # Show usage
 show_usage() {
-    echo "Usage: sudo $0 [duration] [--stagger N | --sequential | --scan]"
+    echo "Usage: sudo $0 [duration] [--stagger N | --sequential | --scan | --dry-run]"
     echo ""
     echo "Options:"
     echo "  duration        Capture duration in seconds (default: 900 = 15 minutes)"
     echo "  --stagger N     Stagger TFTP transfers by N seconds between each device"
     echo "  --sequential    Sequential TFTP transfers (equivalent to --stagger 15)"
     echo "  --scan          Discover satellites and create configuration file"
+    echo "  --dry-run       Test configuration file parsing without capturing"
     echo "  -h, --help      Show this help message"
     echo ""
     echo "Examples:"
     echo "  sudo $0 --scan             # Discover satellites and save to config"
+    echo "  sudo $0 --dry-run          # Test config file parsing"
     echo "  sudo $0                    # 15 minute capture using saved config"
     echo "  sudo $0 300                # 5 minute capture, all TFTP at once"
     echo "  sudo $0 900 --stagger 10   # 15 min capture, 10s delay between TFTPs"
@@ -42,6 +44,7 @@ show_usage() {
 # Parse arguments
 DURATION=$DEFAULT_DURATION
 RUN_SCAN=false
+DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -50,6 +53,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --scan)
             RUN_SCAN=true
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
             shift
             ;;
         --stagger)
@@ -100,10 +107,14 @@ if [ -f "$CONFIG_FILE" ]; then
             continue
         fi
 
-        # Parse IP:Name format
+        # Parse IP:Name format (strip any comments after #)
         if [[ "$line" =~ ^([0-9.]+):(.+)$ ]]; then
             ip="${BASH_REMATCH[1]}"
-            name="${BASH_REMATCH[2]}"
+            name_with_comment="${BASH_REMATCH[2]}"
+
+            # Remove comment (everything after #) and trim whitespace
+            name="${name_with_comment%%#*}"
+            name="${name//[[:space:]]/}"  # Remove all whitespace
 
             # Quick ping check (1 second timeout)
             if ping -c 1 -W 1 "$ip" &> /dev/null; then
@@ -189,6 +200,56 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Dry-run mode - show what would be captured and exit
+if [ "$DRY_RUN" = true ]; then
+    echo -e "${BLUE}============================================${NC}"
+    echo -e "${BLUE}DRY RUN - Configuration Test${NC}"
+    echo -e "${BLUE}============================================${NC}"
+    echo ""
+    echo -e "Configuration file: ${GREEN}${CONFIG_FILE}${NC}"
+    echo -e "Reachable devices: ${GREEN}${#DEVICES[@]}${NC}"
+    echo -e "Unreachable devices: ${RED}${#UNREACHABLE_DEVICES[@]}${NC}"
+    echo ""
+    echo -e "${YELLOW}Devices that would be captured:${NC}"
+    echo ""
+
+    for device in "${DEVICES[@]}"; do
+        IFS=':' read -r ip name <<< "$device"
+        echo -e "  ${GREEN}✓${NC} ${name}"
+        echo -e "      IP Address: ${ip}"
+
+        # Try to extract MAC from config file if it exists
+        if [ -f "$CONFIG_FILE" ]; then
+            mac=$(grep "^${ip}:" "$CONFIG_FILE" | sed -n 's/.*# MAC: \([0-9a-fA-F:]*\).*/\1/p')
+            if [ -n "$mac" ]; then
+                echo -e "      MAC Address: ${mac}"
+            fi
+        fi
+
+        echo -e "      Capture file: dhcp_${name}_TIMESTAMP.pcap"
+        echo ""
+    done
+
+    if [ ${#UNREACHABLE_DEVICES[@]} -gt 0 ]; then
+        echo -e "${YELLOW}Unreachable devices (would be skipped):${NC}"
+        echo ""
+        for device in "${UNREACHABLE_DEVICES[@]}"; do
+            IFS=':' read -r ip name <<< "$device"
+            echo -e "  ${RED}✗${NC} ${name} (${ip})"
+        done
+        echo ""
+    fi
+
+    echo -e "${BLUE}============================================${NC}"
+    echo -e "${GREEN}Configuration parsing successful!${NC}"
+    echo -e "${BLUE}============================================${NC}"
+    echo ""
+    echo "To run actual capture:"
+    echo -e "  ${BLUE}sudo $0 [duration]${NC}"
+    echo ""
+    exit 0
+fi
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then

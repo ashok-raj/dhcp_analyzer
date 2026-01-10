@@ -356,12 +356,13 @@ def save_config(devices: List[TPLinkDevice], config_file: str = "satellites.conf
     try:
         with open(config_file, 'w') as f:
             f.write("# TP-Link Satellite Configuration\n")
-            f.write("# Format: IP:DeviceName\n")
+            f.write("# Format: IP:DeviceName  # MAC: xx:xx:xx:xx:xx:xx\n")
             f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("#\n")
 
-            for ip, name in device_map.values():
-                f.write(f"{ip}:{name}\n")
+            for device in devices:
+                name = device.get_device_name()
+                f.write(f"{device.ip}:{name}  # MAC: {device.mac}\n")
 
         print(f"{Colors.GREEN}✓ Configuration saved to {config_file}{Colors.NC}")
         print()

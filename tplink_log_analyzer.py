@@ -6,9 +6,11 @@ Analyzes TPLink router log files for DHCP and Mesh events
 
 import re
 import argparse
+import json
 from datetime import datetime
 from collections import defaultdict, Counter
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
+from pathlib import Path
 
 
 class LogEntry:
@@ -38,13 +40,18 @@ class TPLinkLogAnalyzer:
     # IP address pattern
     IP_PATTERN = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
 
-    def __init__(self, log_file):
+    def __init__(self, log_file, known_devices_file=None):
         self.log_file = log_file
         self.entries = []
         self.mesh_events = []
         self.dhcpd_events = []
         self.dhcpc_events = []
         self.errors = []
+        self.known_devices = {}
+
+        # Load known devices if file provided
+        if known_devices_file:
+            self.load_known_devices(known_devices_file)
 
     def parse_logs(self):
         """Parse the log file"""
@@ -76,6 +83,31 @@ class TPLinkLogAnalyzer:
                     # Track errors
                     if 'Fail' in message or 'fail' in message or 'Wrong' in message or 'NAK' in message:
                         self.errors.append(entry)
+
+    def load_known_devices(self, known_devices_file):
+        """Load known devices from JSON file"""
+        try:
+            with open(known_devices_file, 'r', encoding='utf-8') as f:
+                self.known_devices = json.load(f)
+            print(f"Loaded {len(self.known_devices)} known devices from {known_devices_file}")
+        except FileNotFoundError:
+            print(f"⚠ Warning: Known devices file not found: {known_devices_file}")
+        except json.JSONDecodeError as e:
+            print(f"⚠ Warning: Error parsing known devices file: {e}")
+
+    def get_device_alias(self, mac: str) -> Optional[str]:
+        """Get device alias for a MAC address"""
+        mac = mac.upper()
+        if mac in self.known_devices:
+            return self.known_devices[mac].get('alias', None)
+        return None
+
+    def format_mac_with_alias(self, mac: str) -> str:
+        """Format MAC address with alias if available"""
+        alias = self.get_device_alias(mac)
+        if alias:
+            return f"{mac} ({alias})"
+        return mac
 
     def analyze_mesh_events(self):
         """Analyze Mesh client events"""
@@ -244,11 +276,12 @@ class TPLinkLogAnalyzer:
         print(f"Unique mesh clients: {mesh_data['unique_macs']}")
 
         print(f"\nTop 10 clients by activity (add + delete events):")
-        print(f"{'MAC Address':<20} {'Adds':<8} {'Dels':<8} {'Total':<8} {'Status'}")
-        print("-" * 70)
+        print(f"{'MAC Address':<20} {'Adds':<8} {'Dels':<8} {'Total':<8} {'Status':<10} {'Device'}")
+        print("-" * 100)
         for mac, adds, dels, total in mesh_data['churn_data'][:10]:
             status = "Stable" if abs(adds - dels) <= 1 else "Churning"
-            print(f"{mac:<20} {adds:<8} {dels:<8} {total:<8} {status}")
+            alias = self.get_device_alias(mac) or ""
+            print(f"{mac:<20} {adds:<8} {dels:<8} {total:<8} {status:<10} {alias}")
 
         # DHCP Server analysis
         print("\n" + "=" * 80)
@@ -270,26 +303,32 @@ class TPLinkLogAnalyzer:
             print(f"\n⚠ WARNING: {dhcp_data['nak_count']} DHCP NAK(s) detected!")
             print("\nNAKs by client:")
             for mac, nak_events in dhcp_data['nak_by_mac'].items():
-                print(f"  {mac}: {len(nak_events)} NAK(s)")
+                alias = self.get_device_alias(mac)
+                if alias:
+                    print(f"  {mac} ({alias}): {len(nak_events)} NAK(s)")
+                else:
+                    print(f"  {mac}: {len(nak_events)} NAK(s)")
 
         # IP assignments
         if dhcp_data['ip_assignments']:
             print(f"\nIP Assignments (last per client):")
-            print(f"{'MAC Address':<20} {'IP Address':<16} {'Type':<8} {'Timestamp'}")
-            print("-" * 70)
+            print(f"{'MAC Address':<20} {'IP Address':<16} {'Type':<8} {'Timestamp':<20} {'Device'}")
+            print("-" * 110)
             for mac, assignments in sorted(dhcp_data['ip_assignments'].items()):
                 last_assignment = assignments[-1]
                 timestamp, ip, msg_type = last_assignment
-                print(f"{mac:<20} {ip:<16} {msg_type:<8} {timestamp}")
+                alias = self.get_device_alias(mac) or ""
+                print(f"{mac:<20} {ip:<16} {msg_type:<8} {str(timestamp):<20} {alias}")
 
         # Frequent DHCP clients
         frequent = self.find_frequent_dhcp_clients(threshold=5)
         if frequent:
             print(f"\n⚠ High DHCP activity clients (5+ requests):")
-            print(f"{'MAC Address':<20} {'Request Count'}")
-            print("-" * 40)
+            print(f"{'MAC Address':<20} {'Request Count':<15} {'Device'}")
+            print("-" * 70)
             for mac, count in frequent:
-                print(f"{mac:<20} {count}")
+                alias = self.get_device_alias(mac) or ""
+                print(f"{mac:<20} {count:<15} {alias}")
 
         # DHCP Client (WAN) analysis
         print("\n" + "=" * 80)
@@ -332,6 +371,9 @@ class TPLinkLogAnalyzer:
 
         print("=" * 80)
         print(f"TIMELINE FOR MAC: {mac_filter}")
+        alias = self.get_device_alias(mac_filter.upper())
+        if alias:
+            print(f"Device: {alias}")
         print("=" * 80)
         print(f"Total events: {len(events)}\n")
 
@@ -393,6 +435,8 @@ Examples:
 
     parser.add_argument('log_file', help='TPLink log file to analyze')
     parser.add_argument('-m', '--mac', help='Filter events by MAC address (partial match)')
+    parser.add_argument('-d', '--devices', help='Known devices JSON file (default: known_devices.json)',
+                        default='known_devices.json')
     parser.add_argument('--storms', action='store_true', help='Detect DHCP storms')
     parser.add_argument('--storm-window', type=int, default=10, help='Storm detection window in seconds (default: 10)')
     parser.add_argument('--storm-threshold', type=int, default=5, help='Storm detection threshold (default: 5)')
@@ -400,7 +444,9 @@ Examples:
     args = parser.parse_args()
 
     # Parse logs
-    analyzer = TPLinkLogAnalyzer(args.log_file)
+    # Check if devices file exists before passing it
+    devices_file = args.devices if Path(args.devices).exists() else None
+    analyzer = TPLinkLogAnalyzer(args.log_file, known_devices_file=devices_file)
     print(f"Parsing log file: {args.log_file}...")
     analyzer.parse_logs()
 
@@ -423,10 +469,11 @@ Examples:
 
         if storms:
             print(f"⚠ Detected {len(storms)} potential DHCP storm(s):")
-            print(f"{'Timestamp':<20} {'MAC Address':<20} {'Requests':<10} {'Window'}")
-            print("-" * 70)
+            print(f"{'Timestamp':<20} {'MAC Address':<20} {'Requests':<10} {'Window':<8} {'Device'}")
+            print("-" * 100)
             for timestamp, mac, count, window in storms[:20]:  # Show top 20
-                print(f"{timestamp!s:<20} {mac:<20} {count:<10} {window}s")
+                alias = analyzer.get_device_alias(mac) or ""
+                print(f"{timestamp!s:<20} {mac:<20} {count:<10} {window}s{' '*6}{alias}")
         else:
             print("✓ No DHCP storms detected")
 
