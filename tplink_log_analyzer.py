@@ -444,9 +444,7 @@ Examples:
     args = parser.parse_args()
 
     # Parse logs
-    # Check if devices file exists before passing it
-    devices_file = args.devices if Path(args.devices).exists() else None
-    analyzer = TPLinkLogAnalyzer(args.log_file, known_devices_file=devices_file)
+    analyzer = TPLinkLogAnalyzer(args.log_file, known_devices_file=args.devices)
     print(f"Parsing log file: {args.log_file}...")
     analyzer.parse_logs()
 
